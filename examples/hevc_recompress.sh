@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LIST="test_video_names.txt"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PD="$(cd "${HERE}/.." && pwd)"
+LIST="${PD}/test_video_names.txt"
 
 if [[ $# -lt 2 || $# -gt 3 ]]; then
   echo "Usage: $0 <crf> <in_dir> <jobs>" >&2
@@ -13,7 +15,7 @@ IN_DIR="${2%/}"
 JOBS="$3"
 
 TMPDIR="$(mktemp -d)"
-OUT_ZIP="$PWD/comma2k19_submission.zip"
+OUT_ZIP="$PD/comma2k19_submission.zip"
 
 export CRF IN_DIR TMPDIR
 
