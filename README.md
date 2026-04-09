@@ -144,6 +144,36 @@ The official evaluation has a time limit of 30 minutes. If your inflation script
    <td>
    </td>
    <td>
+    1.89
+   </td>
+   <td>
+    neural_inflate
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/49" target="_blank">
+     #49
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+    1.94
+   </td>
+   <td>
+    roi_v2
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/48" target="_blank">
+     #48
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
     1.95
    </td>
    <td>
@@ -167,6 +197,36 @@ The official evaluation has a time limit of 30 minutes. If your inflation script
    <td>
     <a href="https://github.com/commaai/comma_video_compression_challenge/pull/30" target="_blank">
      #30
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+    2.01
+   </td>
+   <td>
+    roi_gop300_c34
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/43" target="_blank">
+     #43
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+    2.02
+   </td>
+   <td>
+    v4_qp_aq2_roi
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/44" target="_blank">
+     #44
     </a>
    </td>
   </tr>
@@ -317,6 +377,21 @@ The official evaluation has a time limit of 30 minutes. If your inflation script
    <td>
     <a href="https://github.com/commaai/comma_video_compression_challenge/tree/3e91fd50585789e50a636479ae80f4f877c5e2ac/submissions/baseline_fast" target="_blank">
      #1
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+    5.09
+   </td>
+   <td>
+    damir_bearclaw_003
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/39" target="_blank">
+     #39
     </a>
    </td>
   </tr>
