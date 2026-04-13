@@ -192,6 +192,21 @@ The official evaluation has a time limit of 30 minutes. If your inflation script
     1.98
    </td>
    <td>
+    svtav1_av1grain_10bit
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/51" target="_blank">
+     #51
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+    1.98
+   </td>
+   <td>
     damir_bearclaw_002
    </td>
    <td>
@@ -227,6 +242,21 @@ The official evaluation has a time limit of 30 minutes. If your inflation script
    <td>
     <a href="https://github.com/commaai/comma_video_compression_challenge/pull/44" target="_blank">
      #44
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+    2.03
+   </td>
+   <td>
+    av1_crf31_bicubic
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/52" target="_blank">
+     #52
     </a>
    </td>
   </tr>
