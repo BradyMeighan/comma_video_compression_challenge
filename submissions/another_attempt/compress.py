@@ -31,6 +31,13 @@ from enum import Enum
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# Performance optimizations for high-end GPUs (e.g. RTX 3090, 4090, 5090)
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision('high')
+
 import einops
 from tqdm import tqdm
 from safetensors.torch import load_file
@@ -608,7 +615,7 @@ def train_run(run, generator, loader, device, archive_dir, aux_models, state_dic
             in_mask2 = in_mask2.to(device).long()
             in_pose6 = in_pose6.to(device).float()
 
-            with torch.no_grad():
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
                 real1 = F.interpolate(batch[:, 0], (384, 512), mode="bilinear", align_corners=False)
                 real2 = F.interpolate(batch[:, 1], (384, 512), mode="bilinear", align_corners=False)
                 gt_logits1, gt_logits2 = segnet(real1).float(), segnet(real2).float()
@@ -616,51 +623,52 @@ def train_run(run, generator, loader, device, archive_dir, aux_models, state_dic
                 gt_pose = get_pose_tensor(posenet(posenet.preprocess_input(batch))).float()[..., :6]
 
             optimizer.zero_grad(set_to_none=True)
-            pred1, pred2 = generator(in_mask2, in_pose6)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                pred1, pred2 = generator(in_mask2, in_pose6)
 
-            up1 = F.interpolate(pred1, (874, 1164), mode="bilinear", align_corners=False)
-            up2 = F.interpolate(pred2, (874, 1164), mode="bilinear", align_corners=False)
-            dn1 = F.interpolate(diff_round(up1.clamp(0, 255)), (384, 512), mode="bilinear", align_corners=False)
-            dn2 = F.interpolate(diff_round(up2.clamp(0, 255)), (384, 512), mode="bilinear", align_corners=False)
+                up1 = F.interpolate(pred1, (874, 1164), mode="bilinear", align_corners=False)
+                up2 = F.interpolate(pred2, (874, 1164), mode="bilinear", align_corners=False)
+                dn1 = F.interpolate(diff_round(up1.clamp(0, 255)), (384, 512), mode="bilinear", align_corners=False)
+                dn2 = F.interpolate(diff_round(up2.clamp(0, 255)), (384, 512), mode="bilinear", align_corners=False)
 
-            zero = torch.tensor(0.0, device=device)
-            loss_pose = loss_seg2 = loss_seg1 = loss_seg2_ce = loss_seg1_ce = zero
+                zero = torch.tensor(0.0, device=device)
+                loss_pose = loss_seg2 = loss_seg1 = loss_seg2_ce = loss_seg1_ce = zero
 
-            if run.stage in [Stage.FINETUNE, Stage.JOINT]:
-                fake_pose = get_pose_tensor(posenet(pack_pair_yuv6(dn1, dn2).float())).float()[..., :6]
-                loss_pose = F.mse_loss(fake_pose, gt_pose)
+                if run.stage in [Stage.FINETUNE, Stage.JOINT]:
+                    fake_pose = get_pose_tensor(posenet(pack_pair_yuv6(dn1, dn2).float())).float()[..., :6]
+                    loss_pose = F.mse_loss(fake_pose, gt_pose)
 
-            if run.stage in [Stage.ANCHOR, Stage.JOINT]:
-                logits2    = segnet(dn2).float()
-                ce2        = F.cross_entropy(logits2, gt_mask2, reduction="none")
-                with torch.no_grad():
-                    boost2 = 1.0 + (logits2.argmax(1) != gt_mask2).float() * run.error_boost
-                loss_seg2_ce = (ce2 * boost2).mean()
-                kl2          = kl_on_logits(logits2, gt_logits2) / (384 * 512)
-                loss_seg2    = 100.0 * (seg2_kl_w * kl2 + seg2_ce_w * 0.5 * run.ce_weight * loss_seg2_ce)
+                if run.stage in [Stage.ANCHOR, Stage.JOINT]:
+                    logits2    = segnet(dn2).float()
+                    ce2        = F.cross_entropy(logits2, gt_mask2, reduction="none")
+                    with torch.no_grad():
+                        boost2 = 1.0 + (logits2.argmax(1) != gt_mask2).float() * run.error_boost
+                    loss_seg2_ce = (ce2 * boost2).mean()
+                    kl2          = kl_on_logits(logits2, gt_logits2) / (384 * 512)
+                    loss_seg2    = 100.0 * (seg2_kl_w * kl2 + seg2_ce_w * 0.5 * run.ce_weight * loss_seg2_ce)
 
-            # Frame1 segnet loss: applied via fade schedule OR explicit weight (new)
-            do_seg1_fade  = frame1_sem_w > 0
-            do_seg1_fixed = run.frame1_seg_weight > 0
-            if do_seg1_fade or do_seg1_fixed:
-                logits1    = segnet(dn1).float()
-                ce1        = F.cross_entropy(logits1, gt_mask1, reduction="none")
-                with torch.no_grad():
-                    boost1 = 1.0 + (logits1.argmax(1) != gt_mask1).float() * run.error_boost
-                loss_seg1_ce = (ce1 * boost1).mean()
-                eff_w = frame1_sem_w if do_seg1_fade else run.frame1_seg_weight
-                if run.stage == Stage.JOINT:
-                    kl1       = kl_on_logits(logits1, gt_logits1) / (384 * 512)
-                    loss_seg1 = 100.0 * eff_w * (seg2_kl_w * kl1 + seg2_ce_w * 0.5 * run.ce_weight * loss_seg1_ce)
-                else:
-                    loss_seg1 = 100.0 * eff_w * run.ce_weight * loss_seg1_ce
+                # Frame1 segnet loss: applied via fade schedule OR explicit weight (new)
+                do_seg1_fade  = frame1_sem_w > 0
+                do_seg1_fixed = run.frame1_seg_weight > 0
+                if do_seg1_fade or do_seg1_fixed:
+                    logits1    = segnet(dn1).float()
+                    ce1        = F.cross_entropy(logits1, gt_mask1, reduction="none")
+                    with torch.no_grad():
+                        boost1 = 1.0 + (logits1.argmax(1) != gt_mask1).float() * run.error_boost
+                    loss_seg1_ce = (ce1 * boost1).mean()
+                    eff_w = frame1_sem_w if do_seg1_fade else run.frame1_seg_weight
+                    if run.stage == Stage.JOINT:
+                        kl1       = kl_on_logits(logits1, gt_logits1) / (384 * 512)
+                        loss_seg1 = 100.0 * eff_w * (seg2_kl_w * kl1 + seg2_ce_w * 0.5 * run.ce_weight * loss_seg1_ce)
+                    else:
+                        loss_seg1 = 100.0 * eff_w * run.ce_weight * loss_seg1_ce
 
-            if run.stage == Stage.ANCHOR:
-                loss = loss_seg2
-            elif run.stage == Stage.FINETUNE:
-                loss = loss_seg1 + run.pose_weight * loss_pose * 10.0
-            else:  # JOINT
-                loss = loss_seg2 + loss_seg1 + 30.0 * run.pose_weight * loss_pose
+                if run.stage == Stage.ANCHOR:
+                    loss = loss_seg2
+                elif run.stage == Stage.FINETUNE:
+                    loss = loss_seg1 + run.pose_weight * loss_pose * 10.0
+                else:  # JOINT
+                    loss = loss_seg2 + loss_seg1 + 30.0 * run.pose_weight * loss_pose
 
             assert_finite("loss", loss)
             loss.backward()
