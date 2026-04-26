@@ -125,7 +125,7 @@ class FiLMSepResBlock(nn.Module):
         return self.act(x + xb * (1.0 + gamma) + beta)
 
 class SharedMaskDecoder(nn.Module):
-    def __init__(self, num_classes=5, emb_dim=6, c1=64, c2=80, depth_mult=1):
+    def __init__(self, num_classes=5, emb_dim=6, c1=56, c2=64, depth_mult=1):
         super().__init__()
         self.embedding  = QEmbedding(num_classes, emb_dim)
         self.stem_conv  = SepConvGNAct(emb_dim + 2, c1, depth_mult=depth_mult)
@@ -147,7 +147,7 @@ class SharedMaskDecoder(nn.Module):
         return self.fuse_block(self.fuse(torch.cat([z, s], dim=1)))
 
 class Frame2StaticHead(nn.Module):
-    def __init__(self, in_ch, hidden=64, depth_mult=1):
+    def __init__(self, in_ch, hidden=52, depth_mult=1):
         super().__init__()
         self.block1 = SepResBlock(in_ch, depth_mult=depth_mult)
         self.block2 = SepResBlock(in_ch, depth_mult=depth_mult)
@@ -157,7 +157,7 @@ class Frame2StaticHead(nn.Module):
         return torch.sigmoid(self.head(self.pre(self.block2(self.block1(feat))))) * 255.0
 
 class FrameHead(nn.Module):
-    def __init__(self, in_ch, cond_dim=COND_DIM, hidden=64, depth_mult=1):
+    def __init__(self, in_ch, cond_dim=COND_DIM, hidden=52, depth_mult=1):
         super().__init__()
         self.block1 = FiLMSepResBlock(in_ch, cond_dim, depth_mult=depth_mult)
         self.block2 = SepResBlock(in_ch, depth_mult=depth_mult)
@@ -169,11 +169,11 @@ class FrameHead(nn.Module):
 class JointFrameGenerator(nn.Module):
     def __init__(self, num_classes=5, pose_dim=POSE_DIM, cond_dim=COND_DIM, depth_mult=1):
         super().__init__()
-        self.shared_trunk = SharedMaskDecoder(num_classes, emb_dim=6, c1=64, c2=80, depth_mult=depth_mult)
+        self.shared_trunk = SharedMaskDecoder(num_classes, emb_dim=6, c1=56, c2=64, depth_mult=depth_mult)
         self.pose_mlp = nn.Sequential(
             nn.Linear(pose_dim, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
-        self.frame1_head = FrameHead(in_ch=64, cond_dim=cond_dim, hidden=64, depth_mult=depth_mult)
-        self.frame2_head = Frame2StaticHead(in_ch=64, hidden=64, depth_mult=depth_mult)
+        self.frame1_head = FrameHead(in_ch=56, cond_dim=cond_dim, hidden=52, depth_mult=depth_mult)
+        self.frame2_head = Frame2StaticHead(in_ch=56, hidden=52, depth_mult=depth_mult)
 
     def forward(self, mask2, pose6):
         coords = make_coord_grid(mask2.shape[0], NET_H, NET_W, mask2.device, torch.float32)

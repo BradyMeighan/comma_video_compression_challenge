@@ -539,7 +539,7 @@ class FiLMSepResBlock(nn.Module):
 
 class SharedMaskDecoder(nn.Module):
     """Mask is fed at MASK_H×MASK_W; embeddings are bilinearly upsampled to NET_H×NET_W."""
-    def __init__(self, num_classes=5, emb_dim=6, c1=64, c2=80, depth_mult=1):
+    def __init__(self, num_classes=5, emb_dim=6, c1=56, c2=64, depth_mult=1):
         super().__init__()
         self.embedding  = QEmbedding(num_classes, emb_dim, quantize_weight=False)
         self.stem_conv  = SepConvGNAct(emb_dim + 2, c1, depth_mult=depth_mult)
@@ -561,7 +561,7 @@ class SharedMaskDecoder(nn.Module):
         return self.fuse_block(self.fuse(torch.cat([z, s], dim=1)))
 
 class FrameHead(nn.Module):
-    def __init__(self, in_ch, cond_dim=COND_DIM, hidden=64, depth_mult=1):
+    def __init__(self, in_ch, cond_dim=COND_DIM, hidden=52, depth_mult=1):
         super().__init__()
         self.block1 = FiLMSepResBlock(in_ch, cond_dim, depth_mult=depth_mult)
         self.block2 = SepResBlock(in_ch, depth_mult=depth_mult)
@@ -571,7 +571,7 @@ class FrameHead(nn.Module):
         return torch.sigmoid(self.head(self.pre(self.block2(self.block1(feat, cond))))) * 255.0
 
 class Frame2StaticHead(nn.Module):
-    def __init__(self, in_ch, hidden=64, depth_mult=1):
+    def __init__(self, in_ch, hidden=52, depth_mult=1):
         super().__init__()
         self.block1 = SepResBlock(in_ch, depth_mult=depth_mult)
         self.block2 = SepResBlock(in_ch, depth_mult=depth_mult)
@@ -584,11 +584,11 @@ class Frame2StaticHead(nn.Module):
 class JointFrameGenerator(nn.Module):
     def __init__(self, num_classes=5, pose_dim=POSE_DIM, cond_dim=COND_DIM, depth_mult=1):
         super().__init__()
-        self.shared_trunk = SharedMaskDecoder(num_classes, emb_dim=6, c1=64, c2=80, depth_mult=depth_mult)
+        self.shared_trunk = SharedMaskDecoder(num_classes, emb_dim=6, c1=56, c2=64, depth_mult=depth_mult)
         self.pose_mlp = nn.Sequential(
             nn.Linear(pose_dim, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
-        self.frame1_head = FrameHead(in_ch=64, cond_dim=cond_dim, hidden=64, depth_mult=depth_mult)
-        self.frame2_head = Frame2StaticHead(in_ch=64, hidden=64, depth_mult=depth_mult)
+        self.frame1_head = FrameHead(in_ch=56, cond_dim=cond_dim, hidden=52, depth_mult=depth_mult)
+        self.frame2_head = Frame2StaticHead(in_ch=56, hidden=52, depth_mult=depth_mult)
 
     def set_qat(self, enabled):
         for m in self.modules():
@@ -596,12 +596,9 @@ class JointFrameGenerator(nn.Module):
 
     def forward(self, mask2, pose6):
         coords = make_coord_grid(mask2.shape[0], NET_H, NET_W, mask2.device, torch.float32)
-        feat = checkpoint.checkpoint(self.shared_trunk, mask2, coords, use_reentrant=False)
+        feat = self.shared_trunk(mask2, coords)
         cond = self.pose_mlp(pose6)
-        return (
-            self.frame1_head(feat, cond),
-            checkpoint.checkpoint(self.frame2_head, feat, use_reentrant=False),
-        )
+        return self.frame1_head(feat, cond), self.frame2_head(feat)
 
 
 # ─── Training ─────────────────────────────────────────────────────────────────
@@ -682,7 +679,7 @@ def train_run(run, generator, loader, device, archive_dir, aux_models, state_dic
             gt_mask2 = gt_mask2.to(device).long()
             in_pose6 = in_pose6.to(device).float()
 
-            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.no_grad():
                 real1 = F.interpolate(batch[:, 0], (NET_H, NET_W), mode="bilinear", align_corners=False)
                 real2 = F.interpolate(batch[:, 1], (NET_H, NET_W), mode="bilinear", align_corners=False)
                 gt_logits1, gt_logits2 = segnet(real1).float(), segnet(real2).float()
@@ -690,7 +687,7 @@ def train_run(run, generator, loader, device, archive_dir, aux_models, state_dic
                 gt_pose = get_pose_tensor(posenet(posenet.preprocess_input(batch))).float()[..., :6]
 
             optimizer.zero_grad(set_to_none=True)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            if True:
                 pred1, pred2 = generator(in_mask, in_pose6)
 
                 up1 = F.interpolate(pred1, (OUT_H, OUT_W), mode="bilinear", align_corners=False)
