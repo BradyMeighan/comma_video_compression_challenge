@@ -587,13 +587,13 @@ class Frame2StaticHead(nn.Module):
 class JointFrameGenerator(nn.Module):
     def __init__(self, num_classes=5, pose_dim=POSE_DIM, cond_dim=COND_DIM, depth_mult=1):
         super().__init__()
-        self.shared_trunk = SharedMaskDecoder(num_classes, emb_dim=6, c1=56, c2=64, depth_mult=depth_mult)
+        # Wider trunk (c1=72, c2=88) — the trunk sees the noisy mask and is the
+        # capacity floor for seg distortion. Heads stay at depth_mult=1.
+        self.shared_trunk = SharedMaskDecoder(num_classes, emb_dim=6, c1=72, c2=88, depth_mult=depth_mult)
         self.pose_mlp = nn.Sequential(
             nn.Linear(pose_dim, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
-        # Heads use depth_mult=2 (vs trunk depth_mult=1) — heads produce pixels and
-        # need more capacity to overcome FP4 quant noise; +~20K params, +~10KB at FP4.
-        self.frame1_head = FrameHead(in_ch=56, cond_dim=cond_dim, hidden=52, depth_mult=2)
-        self.frame2_head = Frame2StaticHead(in_ch=56, hidden=52, depth_mult=2)
+        self.frame1_head = FrameHead(in_ch=72, cond_dim=cond_dim, hidden=52, depth_mult=depth_mult)
+        self.frame2_head = Frame2StaticHead(in_ch=72, hidden=52, depth_mult=depth_mult)
 
     def set_qat(self, enabled):
         for m in self.modules():
