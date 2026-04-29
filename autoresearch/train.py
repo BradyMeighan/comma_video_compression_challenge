@@ -251,7 +251,12 @@ def train():
         elapsed = time.time() - t_start
         qat = elapsed > t_anchor_end * QAT_FRAC
         gen.set_qat(qat)
-        boost = ERR_BOOST if elapsed < t_anchor_end * 0.85 else ERR_BOOST_HI
+        if elapsed < t_anchor_end * 0.85:
+            boost = ERR_BOOST
+        elif elapsed < t_anchor_end * 0.95:
+            boost = ERR_BOOST_HI
+        else:
+            boost = ERR_BOOST_HI * 2.0
         # KL→CE schedule
         alpha = min(1.0, elapsed / max(1, t_anchor_end * QAT_FRAC * 0.5))
         kl_w = 0.9 - 0.9 * alpha
