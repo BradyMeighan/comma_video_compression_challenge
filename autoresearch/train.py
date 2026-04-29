@@ -312,6 +312,9 @@ def train():
     for p in gen.parameters(): p.requires_grad = True
     opt = torch.optim.AdamW(gen.parameters(), lr=JT_LR, betas=(0.9, 0.99))
     gen.set_qat(True)
+    # EMA of gen parameters during joint
+    ema_state = {k: v.detach().clone() for k, v in gen.state_dict().items()}
+    ema_decay = 0.9
 
     while time.time() - t_start < t_jt_end:
         gen.train()
@@ -339,6 +342,12 @@ def train():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(gen.parameters(), GRAD_CLIP)
             opt.step()
+            with torch.no_grad():
+                for k, v in gen.state_dict().items():
+                    if v.dtype.is_floating_point:
+                        ema_state[k].mul_(ema_decay).add_(v.detach(), alpha=1 - ema_decay)
+                    else:
+                        ema_state[k].copy_(v)
         epoch += 1
 
     jt_ep = epoch - anchor_ep - ft_ep
@@ -350,6 +359,9 @@ def train():
     # ── Free training-only nets before eval ──
     del segnet, posenet, opt
     gpu_cleanup()
+
+    # ── Swap to EMA weights for eval ──
+    gen.load_state_dict(ema_state)
 
     # ── Evaluate ──
     result = evaluate(gen, data, device)
