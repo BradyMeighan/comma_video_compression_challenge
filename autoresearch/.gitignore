@@ -2,3 +2,6 @@ _cache/
 __pycache__/
 *.pyc
 run.log
+results.tsv
+.agents/
+skills-lock.json
