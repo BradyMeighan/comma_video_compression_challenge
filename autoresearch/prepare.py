@@ -7,12 +7,13 @@ prepare.py — Fixed infrastructure for the autoresearch loop.
 ██████████████████████████████████████████████████████████████████████████
 
 Provides:
-  - load_data(device)     → cached dict of rgb, masks, poses, gt tensors
-  - evaluate(model, data) → score dict
-  - Helper functions for loss computation (differentiable eval chain)
-  - GPU memory safety utilities
+  - load_data(device)     → dict with train + val splits (80/20)
+  - evaluate(model, data) → score on HELD-OUT val set (not training data)
+  - Helper functions for loss computation
 
-Data is cached to a single .pt file. First run takes ~30s, after that ~1s.
+CRITICAL DESIGN: eval uses a 20-pair HELD-OUT validation set that the
+model never trains on. This ensures proxy improvements transfer to full
+training — we're measuring generalization, not memorization.
 """
 import sys, os, io, math, time, gc
 from pathlib import Path
@@ -39,7 +40,9 @@ UNCOMPRESSED_SIZE = 37_545_489
 MASK_BYTES = 219_588   # CRF=50 AV1 OBU + brotli (pre-measured)
 POSE_BYTES = 13_194    # float32 numpy + brotli (pre-measured)
 
-N_PROXY_PAIRS = 100    # subset for fast proxy training
+N_TOTAL_PROXY = 100     # total subset from 600
+N_TRAIN = 80            # training split
+N_VAL = 20              # held-out validation split
 PROXY_SEED = 42
 TRAIN_BUDGET_SEC = 300  # 5 minutes wall-clock training
 
@@ -48,14 +51,12 @@ CACHE_DIR = Path(__file__).parent / "_cache"
 # ─── GPU memory safety ───────────────────────────────────────────────
 
 def gpu_cleanup():
-    """Aggressively free GPU memory."""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
 def gpu_mem_mb():
-    """Current GPU memory used in MB."""
     if torch.cuda.is_available():
         return torch.cuda.memory_allocated() / 1024 / 1024
     return 0.0
@@ -65,7 +66,6 @@ def gpu_mem_mb():
 _FP4_LEVELS = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 
 def fp4_round_trip(x, block_size=32):
-    """Simulate FP4 blockwise quantize → dequantize."""
     orig = x.shape
     flat = x.reshape(-1)
     pad = (block_size - flat.numel() % block_size) % block_size
@@ -82,12 +82,10 @@ def fp4_round_trip(x, block_size=32):
     return (q * sc).view(-1)[:x.numel()].view(orig)
 
 def fake_quant_fp4_ste(x, block_size=32):
-    """STE-based fake quantization for training."""
     dq = fp4_round_trip(x, block_size)
     return x + (dq - x).detach()
 
 def apply_fp4_to_model(model):
-    """Hard-quantize all Conv2d/Embedding weights with quantize_weight=True."""
     with torch.no_grad():
         for m in model.modules():
             if isinstance(m, nn.Conv2d) and getattr(m, 'quantize_weight', True):
@@ -96,7 +94,6 @@ def apply_fp4_to_model(model):
                 m.weight.data = fp4_round_trip(m.weight.data)
 
 def estimate_model_bytes(model, brotli_ratio=0.78):
-    """Estimate compressed model size after FP4 + brotli."""
     bits = 0
     for m in model.modules():
         if isinstance(m, nn.Conv2d):
@@ -154,26 +151,26 @@ def kl_on_logits(s, t, temp=2.0):
 
 def load_data(device):
     """
-    Load proxy training data (100 pairs). Cached after first run.
+    Load proxy data with train/val split. Cached after first run.
 
     Returns dict with:
-        rgb:       (100, 2, 874, 1164, 3) uint8 - original frame pairs
-        masks:     (100, 384, 512) uint8 - segnet class indices 0-4
-        poses:     (100, 6) float32 - posenet 6D pose vectors
-        gt_logits: (100, 5, 384, 512) float32 - segnet logits on GT frame2
-        gt_pose:   (100, 6) float32 - posenet pose on GT pairs
+        train_rgb:    (80, 2, 874, 1164, 3) uint8
+        train_masks:  (80, 384, 512) uint8
+        train_poses:  (80, 6) float32
+        val_rgb:      (20, 2, 874, 1164, 3) uint8
+        val_masks:    (20, 384, 512) uint8
+        val_poses:    (20, 6) float32
     """
     CACHE_DIR.mkdir(exist_ok=True)
-    cache_file = CACHE_DIR / f"proxy_{N_PROXY_PAIRS}.pt"
+    cache_file = CACHE_DIR / "proxy_split_v2.pt"
 
     if cache_file.exists():
         print(f"[prepare] Loading cached data ({cache_file.stat().st_size // 1024 // 1024}MB)")
         return torch.load(cache_file, map_location="cpu", weights_only=True)
 
-    print("[prepare] Building data cache (first run only, ~30s)...")
+    print("[prepare] Building data cache with train/val split (first run only, ~30s)...")
     t0 = time.time()
 
-    # Load all 600 pairs on CPU
     files = [l.strip() for l in (ROOT / "public_test_video_names.txt").read_text().splitlines() if l.strip()]
     ds = AVVideoDataset(files, data_dir=ROOT / "videos", batch_size=16,
                         device=torch.device("cpu"), num_threads=2, seed=1234, prefetch_queue_depth=2)
@@ -185,45 +182,54 @@ def load_data(device):
     all_rgb = torch.cat(all_rgb, 0)
     print(f"[prepare] Loaded {all_rgb.shape[0]} pairs in {time.time()-t0:.1f}s")
 
-    # Subsample
     g = torch.Generator()
     g.manual_seed(PROXY_SEED)
-    idx = torch.randperm(all_rgb.shape[0], generator=g)[:N_PROXY_PAIRS]
+    idx = torch.randperm(all_rgb.shape[0], generator=g)[:N_TOTAL_PROXY]
     rgb = all_rgb[idx].contiguous()
     del all_rgb
     gc.collect()
 
-    # Extract masks + poses + GT on GPU (batched, then free immediately)
+    # Split: first 80 = train, last 20 = val
+    train_rgb = rgb[:N_TRAIN].contiguous()
+    val_rgb = rgb[N_TRAIN:].contiguous()
+    del rgb
+
+    # Extract masks + poses on GPU
     segnet = SegNet().eval().to(device)
     segnet.load_state_dict(load_file(segnet_sd_path, device=str(device)))
     posenet = PoseNet().eval().to(device)
     posenet.load_state_dict(load_file(posenet_sd_path, device=str(device)))
 
-    masks_l, poses_l, gt_logits_l = [], [], []
-    BS = 8
-    with torch.inference_mode():
-        for i in tqdm(range(0, N_PROXY_PAIRS, BS), desc="[prepare] Extracting", leave=False):
-            b = rgb[i:i+BS].to(device).float()
-            bc = einops.rearrange(b, 'b t h w c -> b t c h w')
+    def extract(rgb_subset):
+        masks_l, poses_l = [], []
+        BS = 8
+        with torch.inference_mode():
+            for i in range(0, rgb_subset.shape[0], BS):
+                b = rgb_subset[i:i+BS].to(device).float()
+                bc = einops.rearrange(b, 'b t h w c -> b t c h w')
+                r2 = F.interpolate(bc[:, 1], (MODEL_H, MODEL_W), mode='bilinear', align_corners=False)
+                logits = segnet(r2).float()
+                masks_l.append(logits.argmax(1).to(torch.uint8).cpu())
+                pin = posenet.preprocess_input(bc)
+                p6 = get_pose6(posenet, pin).float()
+                poses_l.append(p6.cpu())
+        return torch.cat(masks_l, 0).contiguous(), torch.cat(poses_l, 0).contiguous()
 
-            r2 = F.interpolate(bc[:, 1], (MODEL_H, MODEL_W), mode='bilinear', align_corners=False)
-            logits = segnet(r2).float()
-            masks_l.append(logits.argmax(1).to(torch.uint8).cpu())
-            gt_logits_l.append(logits.cpu())
-
-            pin = posenet.preprocess_input(bc)
-            p6 = get_pose6(posenet, pin).float()
-            poses_l.append(p6.cpu())
+    print("[prepare] Extracting train split...")
+    train_masks, train_poses = extract(train_rgb)
+    print("[prepare] Extracting val split...")
+    val_masks, val_poses = extract(val_rgb)
 
     del segnet, posenet
     gpu_cleanup()
 
     data = {
-        "rgb": rgb,
-        "masks": torch.cat(masks_l, 0).contiguous(),
-        "poses": torch.cat(poses_l, 0).contiguous(),
-        "gt_logits": torch.cat(gt_logits_l, 0).contiguous(),
-        "gt_pose": torch.cat(poses_l, 0).contiguous(),  # same as poses for GT
+        "train_rgb": train_rgb,
+        "train_masks": train_masks,
+        "train_poses": train_poses,
+        "val_rgb": val_rgb,
+        "val_masks": val_masks,
+        "val_poses": val_poses,
     }
     torch.save(data, cache_file)
     print(f"[prepare] Cached {cache_file.stat().st_size // 1024 // 1024}MB in {time.time()-t0:.1f}s")
@@ -232,7 +238,6 @@ def load_data(device):
 # ─── Frozen nets for training ─────────────────────────────────────────
 
 def load_segnet(device):
-    """Load frozen SegNet for training loss. Caller must delete when done."""
     net = SegNet().eval().to(device)
     net.load_state_dict(load_file(segnet_sd_path, device=str(device)))
     for p in net.parameters():
@@ -240,26 +245,20 @@ def load_segnet(device):
     return net
 
 def load_posenet(device):
-    """Load frozen PoseNet for training loss. Caller must delete when done."""
     net = PoseNet().eval().to(device)
     net.load_state_dict(load_file(posenet_sd_path, device=str(device)))
     for p in net.parameters():
         p.requires_grad = False
     return net
 
-# ─── Evaluation ───────────────────────────────────────────────────────
+# ─── Evaluation (on HELD-OUT val set) ─────────────────────────────────
 
 def evaluate(model, data, device, batch_size=16):
     """
-    Ground truth evaluation. Applies FP4 quantization, runs full distortion.
+    Ground truth evaluation on HELD-OUT validation set.
 
-    Args:
-        model: nn.Module with forward(mask_long, pose_float) -> (f1, f2)
-               each (B, 3, 384, 512) in [0, 255]
-        data:  dict from load_data()
-        device: torch device
-
-    Returns dict with score (lower = better) and breakdown.
+    This evaluates on the 20 val pairs that the model NEVER trained on.
+    This ensures proxy scores correlate with full-training generalization.
     """
     model = model.to(device)
     model.eval()
@@ -268,9 +267,9 @@ def evaluate(model, data, device, batch_size=16):
     dist_net = DistortionNet().eval().to(device)
     dist_net.load_state_dicts(posenet_sd_path, segnet_sd_path, device)
 
-    rgb = data["rgb"]
-    masks = data["masks"]
-    poses = data["poses"]
+    rgb = data["val_rgb"]
+    masks = data["val_masks"]
+    poses = data["val_poses"]
     n = rgb.shape[0]
 
     t_seg, t_pose, t_n = 0.0, 0.0, 0

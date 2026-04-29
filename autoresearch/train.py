@@ -214,9 +214,11 @@ def train():
 
     # ── Load data (cached, <1s after first run) ──
     data = load_data(device)
-    rgb, masks, poses = data["rgb"], data["masks"], data["poses"]
+    rgb = data["train_rgb"]
+    masks = data["train_masks"]
+    poses = data["train_poses"]
     n = rgb.shape[0]
-    print(f"data: {n} pairs")
+    print(f"train: {n} pairs, val: {data['val_rgb'].shape[0]} pairs")
 
     # ── Build model ──
     gen = Generator().to(device)
