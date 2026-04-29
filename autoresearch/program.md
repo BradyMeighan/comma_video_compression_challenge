@@ -96,9 +96,15 @@ LOOP FOREVER:
 - **FP4**: 4-bit blockwise quantization (block_size=32), 16-bit scales. ~78% brotli compression on quantized weights
 - **Rate cost**: every extra KB of model ≈ +0.0007 rate_term. A 10KB model size reduction = ~0.007 score improvement
 
-## Proxy vs Full Training
+## Proxy vs Full Training — Why This Scales
 
-This proxy uses 100/600 pairs for 5 minutes. Absolute scores will be worse than full training. What matters is **relative ranking** — if A beats B in proxy, A almost certainly beats B in full training too.
+The proxy uses 100 pairs (from 600), split 80 train / 20 val. **Evaluation is on the held-out 20 val pairs that the model never trains on.** This is critical:
+
+- We measure **generalization**, not memorization. A trick that overfits 80 pairs will score poorly on the 20 val pairs.
+- This mirrors Karpathy's autoresearch design where val_bpb is measured on a separate validation set.
+- Improvements that help on held-out val will transfer to the full 600-pair run because they reflect genuine architectural/loss/optimization advantages, not data memorization.
+
+Absolute proxy scores are higher (worse) than full training. What matters is **relative ranking** — if A beats B on proxy val, A will almost certainly beat B in full training.
 
 ## ═══════════════════════════════════════════════════
 ## RESEARCH DIRECTIONS — From Safe to Exotic
