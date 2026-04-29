@@ -37,7 +37,7 @@ FT_LR         = 5e-4       # finetune stage learning rate
 JT_LR         = 5e-5       # joint stage learning rate
 ERR_BOOST     = 9.0        # error boosting multiplier (normal)
 ERR_BOOST_HI  = 49.0       # error boosting multiplier (late anchor)
-GRAD_CLIP     = 1.0
+GRAD_CLIP     = 0.5
 QAT_FRAC      = 0.7        # fraction of anchor stage before enabling QAT
 
 # Time allocation (fraction of TRAIN_BUDGET_SEC)
