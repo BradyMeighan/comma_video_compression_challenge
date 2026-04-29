@@ -33,7 +33,7 @@ from prepare import (
 
 BATCH_SIZE    = 4
 LR            = 5e-4       # anchor stage learning rate
-FT_LR         = 2e-4       # finetune stage learning rate
+FT_LR         = 5e-4       # finetune stage learning rate
 JT_LR         = 1e-5       # joint stage learning rate
 ERR_BOOST     = 9.0        # error boosting multiplier (normal)
 ERR_BOOST_HI  = 49.0       # error boosting multiplier (late anchor)
