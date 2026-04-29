@@ -172,7 +172,9 @@ class Generator(nn.Module):
         super().__init__()
         self.trunk = Trunk()
         self.pose_mlp = nn.Sequential(
-            nn.Linear(6, COND_DIM), nn.SiLU(), nn.Linear(COND_DIM, COND_DIM),
+            nn.Linear(6, COND_DIM), nn.SiLU(),
+            nn.Linear(COND_DIM, COND_DIM), nn.SiLU(),
+            nn.Linear(COND_DIM, COND_DIM),
         )
         self.h1 = Head1()
         self.h2 = Head2()
