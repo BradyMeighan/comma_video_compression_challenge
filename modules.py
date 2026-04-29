@@ -43,7 +43,7 @@ class ResBlock(nn.Module):
     return self.final_relu(a_out + self.block_b(a_out))
 
 class Hydra(nn.Module):
-  def __init__(self, num_features: int, heads: list[Head]=HEADS):
+  def __init__(self, num_features: int, heads=HEADS):
     super().__init__()
     self.resblock = ResBlock(num_features)
     self.relu = nn.ReLU(inplace=True)
