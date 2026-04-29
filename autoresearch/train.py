@@ -208,6 +208,10 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gpu_cleanup()
 
+    # Deterministic for reproducibility
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+
     # ── Load data (cached, <1s after first run) ──
     data = load_data(device)
     rgb, masks, poses = data["rgb"], data["masks"], data["poses"]
