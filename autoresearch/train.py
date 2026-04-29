@@ -179,6 +179,10 @@ class Generator(nn.Module):
             nn.Linear(COND_DIM, COND_DIM), nn.SiLU(),
             nn.Linear(COND_DIM, COND_DIM),
         )
+        # FiLM that modulates trunk features for h1 only
+        self.trunk_film = nn.Linear(COND_DIM, C1 * 2)
+        nn.init.zeros_(self.trunk_film.weight)
+        nn.init.zeros_(self.trunk_film.bias)
         self.h1 = Head1()
         self.h2 = Head2()
 
@@ -190,7 +194,10 @@ class Generator(nn.Module):
     def forward(self, mask, pose):
         co = coords(mask.shape[0], MODEL_H, MODEL_W, mask.device)
         feat = self.trunk(mask, co)
-        return self.h1(feat, self.pose_mlp(pose)), self.h2(feat)
+        cond = self.pose_mlp(pose)
+        g, b = self.trunk_film(cond).unsqueeze(-1).unsqueeze(-1).chunk(2, 1)
+        feat_h1 = feat * (1 + g) + b
+        return self.h1(feat_h1, cond), self.h2(feat)
 
 # ══════════════════════════════════════════════════════════════════════
 # TRAINING LOOP
