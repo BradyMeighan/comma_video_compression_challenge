@@ -50,7 +50,7 @@ T_JOINT       = 0.13       # 13% for joint (both)
 C1            = 56         # stem / output width
 C2            = 64         # bottleneck width
 EMB_DIM       = 6          # mask class embedding dim
-COND_DIM      = 48         # pose conditioning dim
+COND_DIM      = 64         # pose conditioning dim
 HEAD_HIDDEN   = 52         # head pre-output hidden channels
 DM            = 1          # depthwise expansion multiplier
 
