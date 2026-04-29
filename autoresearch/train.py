@@ -294,7 +294,7 @@ def train():
             f1d = F.interpolate(diff_round(F.interpolate(p1, (OUT_H, OUT_W), mode="bilinear", align_corners=False).clamp(0, 255)), (MODEL_H, MODEL_W), mode="bilinear", align_corners=False)
             f2d = F.interpolate(diff_round(F.interpolate(p2, (OUT_H, OUT_W), mode="bilinear", align_corners=False).clamp(0, 255)), (MODEL_H, MODEL_W), mode="bilinear", align_corners=False)
             fp = get_pose6(posenet, pack_pair_yuv6(f1d, f2d).float()).float()
-            loss = 10.0 * F.mse_loss(fp, gt_p)
+            loss = 10.0 * F.smooth_l1_loss(fp, gt_p, beta=0.1)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(gen.parameters(), GRAD_CLIP)
             opt.step()
