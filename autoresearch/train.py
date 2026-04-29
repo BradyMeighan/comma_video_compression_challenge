@@ -160,12 +160,15 @@ class Head2(nn.Module):
 class Head1(nn.Module):
     def __init__(self):
         super().__init__()
+        self.merge = DSConv(C1 + COND_DIM, C1)
         self.r1 = FiLMRes(C1, COND_DIM)
         self.r2 = Res(C1)
         self.pre = DSConv(C1, HEAD_HIDDEN)
         self.out = QConv2d(HEAD_HIDDEN, 3, 1, quantize_weight=False)
     def forward(self, f, c):
-        return torch.sigmoid(self.out(self.pre(self.r2(self.r1(f, c))))) * 255.0
+        cb = c.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, *f.shape[-2:])
+        m = self.merge(torch.cat([f, cb], 1))
+        return torch.sigmoid(self.out(self.pre(self.r2(self.r1(m, c))))) * 255.0
 
 class Generator(nn.Module):
     def __init__(self):
