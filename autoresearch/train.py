@@ -76,6 +76,23 @@ class QEmb(nn.Embedding):
         w = fake_quant_fp4_ste(self.weight) if self.qat and self.quantize_weight else self.weight
         return F.embedding(x, w, self.padding_idx)
 
+class QLinear(nn.Module):
+    """Linear via internal 1x1 QConv2d → gets FP4 byte treatment instead of FP16."""
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__()
+        self.conv = QConv2d(in_features, out_features, 1, bias=bias)
+    @property
+    def weight(self):
+        return self.conv.weight
+    @property
+    def bias(self):
+        return self.conv.bias
+    def forward(self, x):
+        orig = x.shape
+        x = x.reshape(-1, orig[-1], 1, 1)
+        x = self.conv(x)
+        return x.view(*orig[:-1], -1)
+
 # ══════════════════════════════════════════════════════════════════════
 # ARCHITECTURE
 # ══════════════════════════════════════════════════════════════════════
@@ -179,8 +196,8 @@ class Generator(nn.Module):
             nn.Linear(COND_DIM, COND_DIM), nn.SiLU(),
             nn.Linear(COND_DIM, COND_DIM),
         )
-        # FiLM that modulates trunk features for h1 only
-        self.trunk_film = nn.Linear(COND_DIM, C1 * 2)
+        # FiLM that modulates trunk features for h1 only (FP4-quantized via QLinear; init zeros)
+        self.trunk_film = QLinear(COND_DIM, C1 * 2)
         nn.init.zeros_(self.trunk_film.weight)
         nn.init.zeros_(self.trunk_film.bias)
         self.h1 = Head1()
