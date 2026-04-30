@@ -7,8 +7,13 @@ training stages, quantization strategy. The only constraint is that it
 runs within the 5-minute time budget and prints the parseable output.
 
 Run: python train.py
+
+Validation env vars:
+  CONFIG=A|B|C|D       : A=baseline, B=boundary+Lion, C=joint-from-start+boundary, D=per-dim pose MSE
+  TRAIN_BUDGET_SEC=N   : override training budget (default = prepare.TRAIN_BUDGET_SEC)
+  FULL_DATA=1          : use 500/100 split from full 600-pair dataset (vs proxy 80/20)
 """
-import sys, math, time, gc
+import sys, os, math, time, gc
 from pathlib import Path
 
 import einops
@@ -25,7 +30,21 @@ from prepare import (
     diff_round, diff_rgb_to_yuv6, pack_pair_yuv6, get_pose6, kl_on_logits,
     fake_quant_fp4_ste,
     MODEL_H, MODEL_W, OUT_H, OUT_W, TRAIN_BUDGET_SEC,
+    CACHE_DIR, ROOT,
 )
+
+# ── Validation config (env-var driven) ──
+CONFIG          = os.environ.get("CONFIG", "PROD").upper()
+USE_BOUNDARY    = CONFIG in ("B", "C")
+USE_LION        = CONFIG == "B"
+JOINT_ONLY      = CONFIG == "C"
+PERDIM_POSE     = CONFIG == "D"
+USE_FULL_DATA   = bool(int(os.environ.get("FULL_DATA", "0")))
+
+_budget_override = os.environ.get("TRAIN_BUDGET_SEC_OVERRIDE")
+if _budget_override:
+    TRAIN_BUDGET_SEC = int(_budget_override)
+print(f"[config] CONFIG={CONFIG} budget={TRAIN_BUDGET_SEC}s full_data={USE_FULL_DATA}")
 
 # ══════════════════════════════════════════════════════════════════════
 # HYPERPARAMETERS — tune these
@@ -53,6 +72,98 @@ EMB_DIM       = 6          # mask class embedding dim
 COND_DIM      = 64         # pose conditioning dim
 HEAD_HIDDEN   = 52         # head pre-output hidden channels
 DM            = 1          # depthwise expansion multiplier
+
+# ══════════════════════════════════════════════════════════════════════
+# OPTIMIZERS / DATA LOADERS
+# ══════════════════════════════════════════════════════════════════════
+
+class Lion(torch.optim.Optimizer):
+    """Lion optimizer (Chen et al., 2023). Use lr ~3-10x smaller than AdamW."""
+    def __init__(self, params, lr=1e-4, betas=(0.9, 0.99), weight_decay=0.0):
+        defaults = dict(lr=lr, betas=betas, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                if group['weight_decay']:
+                    p.data.mul_(1 - group['lr'] * group['weight_decay'])
+                grad = p.grad
+                state = self.state[p]
+                if not state:
+                    state['exp_avg'] = torch.zeros_like(p)
+                exp_avg = state['exp_avg']
+                beta1, beta2 = group['betas']
+                update = (exp_avg.mul(beta1).add(grad, alpha=1 - beta1)).sign_()
+                p.add_(update, alpha=-group['lr'])
+                exp_avg.mul_(beta2).add_(grad, alpha=1 - beta2)
+        return loss
+
+def load_data_full(device):
+    """Full-dataset variant: split all 600 pairs into 500 train / 100 val. Cached separately."""
+    from tqdm import tqdm
+    from frame_utils import AVVideoDataset
+    from modules import SegNet, PoseNet, segnet_sd_path, posenet_sd_path
+    from safetensors.torch import load_file
+
+    CACHE_DIR.mkdir(exist_ok=True)
+    cache_file = CACHE_DIR / "full_split_500_100.pt"
+    if cache_file.exists():
+        print(f"[full] Loading cached full data ({cache_file.stat().st_size // 1024 // 1024}MB)")
+        return torch.load(cache_file, map_location="cpu", weights_only=True)
+
+    print("[full] Building full data cache (first run, ~3min)...")
+    t0 = time.time()
+    files = [l.strip() for l in (ROOT / "public_test_video_names.txt").read_text().splitlines() if l.strip()]
+    ds = AVVideoDataset(files, data_dir=ROOT / "videos", batch_size=16,
+                        device=torch.device("cpu"), num_threads=2, seed=1234, prefetch_queue_depth=2)
+    ds.prepare_data()
+    dl = torch.utils.data.DataLoader(ds, batch_size=None, num_workers=0)
+    all_rgb = []
+    for _, _, batch in tqdm(dl, desc="[full] Loading video", leave=False):
+        all_rgb.append(batch)
+    all_rgb = torch.cat(all_rgb, 0)
+    print(f"[full] Loaded {all_rgb.shape[0]} pairs in {time.time()-t0:.1f}s")
+
+    g = torch.Generator(); g.manual_seed(42)
+    idx = torch.randperm(all_rgb.shape[0], generator=g)
+    train_idx, val_idx = idx[:500], idx[500:600]
+    train_rgb = all_rgb[train_idx].contiguous()
+    val_rgb = all_rgb[val_idx].contiguous()
+    del all_rgb; gc.collect()
+
+    segnet = SegNet().eval().to(device); segnet.load_state_dict(load_file(segnet_sd_path, device=str(device)))
+    posenet = PoseNet().eval().to(device); posenet.load_state_dict(load_file(posenet_sd_path, device=str(device)))
+
+    def extract(rgb_subset, label):
+        masks_l, poses_l = [], []
+        BS = 8
+        with torch.inference_mode():
+            for i in tqdm(range(0, rgb_subset.shape[0], BS), desc=f"[full] {label}"):
+                b = rgb_subset[i:i+BS].to(device).float()
+                bc = einops.rearrange(b, 'b t h w c -> b t c h w')
+                r2 = F.interpolate(bc[:, 1], (MODEL_H, MODEL_W), mode='bilinear', align_corners=False)
+                masks_l.append(segnet(r2).float().argmax(1).to(torch.uint8).cpu())
+                poses_l.append(get_pose6(posenet, posenet.preprocess_input(bc)).float().cpu())
+        return torch.cat(masks_l, 0).contiguous(), torch.cat(poses_l, 0).contiguous()
+
+    train_masks, train_poses = extract(train_rgb, "train")
+    val_masks, val_poses = extract(val_rgb, "val")
+    del segnet, posenet; gpu_cleanup()
+
+    data = {
+        "train_rgb": train_rgb, "train_masks": train_masks, "train_poses": train_poses,
+        "val_rgb": val_rgb,     "val_masks": val_masks,     "val_poses": val_poses,
+    }
+    torch.save(data, cache_file)
+    print(f"[full] Cached {cache_file.stat().st_size // 1024 // 1024}MB in {time.time()-t0:.1f}s")
+    return data
 
 # ══════════════════════════════════════════════════════════════════════
 # QUANTIZABLE LAYERS
@@ -234,12 +345,14 @@ def train():
     torch.cuda.manual_seed_all(42)
 
     # ── Load data (cached, <1s after first run) ──
-    data = load_data(device)
+    data = load_data_full(device) if USE_FULL_DATA else load_data(device)
     rgb = data["train_rgb"]
     masks = data["train_masks"]
     poses = data["train_poses"]
     n = rgb.shape[0]
     print(f"train: {n} pairs, val: {data['val_rgb'].shape[0]} pairs")
+    # Per-dim pose std for normalization (CONFIG=D)
+    pose_std = data["train_poses"].std(0).clamp_min(1e-3).to(device) if PERDIM_POSE else None
 
     # ── Build model ──
     gen = Generator().to(device)
@@ -257,10 +370,93 @@ def train():
     t_ft_end = TRAIN_BUDGET_SEC * (T_ANCHOR + T_FINETUNE)
     t_jt_end = TRAIN_BUDGET_SEC * (T_ANCHOR + T_FINETUNE + T_JOINT)
 
+    # Optimizer factory: AdamW (default) or Lion (CONFIG=B). Lion uses lr/3.
+    def make_opt(params, lr_val):
+        if USE_LION:
+            return Lion(list(params), lr=lr_val / 3.0, betas=(0.9, 0.99))
+        return torch.optim.AdamW(list(params), lr=lr_val, betas=(0.9, 0.99))
+
+    def boundary_mask(gt_cls):
+        """Returns (B,H,W) float mask, 1.0 at class boundaries."""
+        gt_pad = F.pad(gt_cls.unsqueeze(1).float(), (1, 1, 1, 1), mode='replicate')
+        c = gt_pad[:, :, 1:-1, 1:-1]
+        return ((c != gt_pad[:, :, :-2, 1:-1]) | (c != gt_pad[:, :, 2:, 1:-1]) |
+                (c != gt_pad[:, :, 1:-1, :-2]) | (c != gt_pad[:, :, 1:-1, 2:])).squeeze(1).float()
+
+    # ════════════════ JOINT-ONLY (CONFIG=C): single stage from epoch 0 ════════════════
+    if JOINT_ONLY:
+        for p in gen.parameters(): p.requires_grad = True
+        opt = make_opt(gen.parameters(), LR)
+        ema_state = {k: v.detach().clone() for k, v in gen.state_dict().items()}
+        ema_decay = 0.9
+        total_budget = TRAIN_BUDGET_SEC * 0.95
+
+        while time.time() - t_start < total_budget:
+            gen.train()
+            elapsed = time.time() - t_start
+            progress = elapsed / total_budget
+            qat = progress > 0.4  # QAT after 40% of training
+            gen.set_qat(qat)
+            # KL→CE schedule (early)
+            alpha = min(1.0, progress / 0.2)
+            kl_w = 0.9 - 0.9 * alpha
+            ce_w = 0.1 + 0.9 * alpha
+            # Pose weight ramps up over training
+            pose_w = min(1.0, progress / 0.3)
+
+            for b_rgb, b_mask, b_pose in make_batches(rgb, masks, poses, epoch, device):
+                batch = einops.rearrange(b_rgb, "b t h w c -> b t c h w").float()
+                with torch.no_grad():
+                    r2 = F.interpolate(batch[:, 1], (MODEL_H, MODEL_W), mode="bilinear", align_corners=False)
+                    gt_logits = segnet(r2).float()
+                    gt_cls = gt_logits.argmax(1)
+                    gt_p = get_pose6(posenet, posenet.preprocess_input(batch)).float()
+                opt.zero_grad(set_to_none=True)
+                p1, p2 = gen(b_mask.long(), b_pose.float())
+                f1u = F.interpolate(p1, (OUT_H, OUT_W), mode="bilinear", align_corners=False)
+                f2u = F.interpolate(p2, (OUT_H, OUT_W), mode="bilinear", align_corners=False)
+                f1d = F.interpolate(diff_round(f1u.clamp(0,255)), (MODEL_H,MODEL_W), mode="bilinear", align_corners=False)
+                f2d = F.interpolate(diff_round(f2u.clamp(0,255)), (MODEL_H,MODEL_W), mode="bilinear", align_corners=False)
+                pred_logits = segnet(f2d).float()
+                ce = F.cross_entropy(pred_logits, gt_cls, reduction='none')
+                with torch.no_grad():
+                    p_t = torch.exp(-ce.detach()).clamp_max(0.999)
+                    focal_w = (1.0 - p_t).pow(2.0)
+                    weight = focal_w * (1.0 + 4.0 * boundary_mask(gt_cls))  # boundary-weighted
+                seg_loss = 100.0 * (kl_w * kl_on_logits(pred_logits, gt_logits) / (MODEL_H*MODEL_W) + ce_w * 25.0 * (weight * ce).mean())
+                fp = get_pose6(posenet, pack_pair_yuv6(f1d, f2d).float()).float()
+                pose_loss = 30.0 * F.mse_loss(fp, gt_p)
+                loss = seg_loss + pose_w * pose_loss
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(gen.parameters(), GRAD_CLIP)
+                opt.step()
+                with torch.no_grad():
+                    for k, v in gen.state_dict().items():
+                        if v.dtype.is_floating_point:
+                            ema_state[k].mul_(ema_decay).add_(v.detach(), alpha=1 - ema_decay)
+                        else:
+                            ema_state[k].copy_(v)
+            epoch += 1
+
+        train_time = time.time() - t_start
+        print(f"joint_only_epochs: {epoch}")
+        print(f"total_epochs: {epoch}")
+        print(f"training_sec: {train_time:.1f}")
+        del segnet, posenet, opt
+        gpu_cleanup()
+        gen.load_state_dict(ema_state)
+        result = evaluate(gen, data, device)
+        print("---")
+        for k in ["score", "seg_term", "pose_term", "rate_term", "model_bytes", "total_bytes", "n_params"]:
+            v = result[k]
+            print(f"{k}: {v:.6f}" if isinstance(v, float) else f"{k}: {v}")
+        del gen, data; gpu_cleanup()
+        return
+
     # ════════════════ Stage 1: Anchor (frame2 SegNet) ════════════════
     for p in gen.h1.parameters(): p.requires_grad = False
     for p in gen.pose_mlp.parameters(): p.requires_grad = False
-    opt = torch.optim.AdamW(filter(lambda p: p.requires_grad, gen.parameters()), lr=LR, betas=(0.9, 0.99))
+    opt = make_opt(filter(lambda p: p.requires_grad, gen.parameters()), LR)
 
     while time.time() - t_start < t_anchor_end:
         gen.train()
@@ -287,7 +483,11 @@ def train():
             with torch.no_grad():
                 p_t = torch.exp(-ce.detach()).clamp_max(0.999)
                 focal_w = (1.0 - p_t).pow(2.0)
-            loss = 100.0 * (kl_w * kl_on_logits(pred_logits, gt_logits) / (MODEL_H*MODEL_W) + ce_w * 25.0 * (focal_w * ce).mean())
+                if USE_BOUNDARY:
+                    weight = focal_w * (1.0 + 4.0 * boundary_mask(gt_cls))
+                else:
+                    weight = focal_w
+            loss = 100.0 * (kl_w * kl_on_logits(pred_logits, gt_logits) / (MODEL_H*MODEL_W) + ce_w * 25.0 * (weight * ce).mean())
             loss.backward()
             torch.nn.utils.clip_grad_norm_(gen.parameters(), GRAD_CLIP)
             opt.step()
@@ -301,7 +501,7 @@ def train():
     for p in gen.trunk.parameters(): p.requires_grad = False
     for p in gen.h2.parameters(): p.requires_grad = False
     gen.trunk.eval(); gen.h2.eval()
-    opt = torch.optim.AdamW(filter(lambda p: p.requires_grad, gen.parameters()), lr=FT_LR, betas=(0.9, 0.99))
+    opt = make_opt(filter(lambda p: p.requires_grad, gen.parameters()), FT_LR)
     gen.set_qat(True)
 
     while time.time() - t_start < t_ft_end:
@@ -315,7 +515,10 @@ def train():
             f1d = F.interpolate(diff_round(F.interpolate(p1, (OUT_H, OUT_W), mode="bilinear", align_corners=False).clamp(0, 255)), (MODEL_H, MODEL_W), mode="bilinear", align_corners=False)
             f2d = F.interpolate(diff_round(F.interpolate(p2, (OUT_H, OUT_W), mode="bilinear", align_corners=False).clamp(0, 255)), (MODEL_H, MODEL_W), mode="bilinear", align_corners=False)
             fp = get_pose6(posenet, pack_pair_yuv6(f1d, f2d).float()).float()
-            loss = 10.0 * F.smooth_l1_loss(fp, gt_p, beta=0.1)
+            if PERDIM_POSE:
+                loss = 10.0 * (((fp - gt_p) / pose_std).pow(2)).mean()
+            else:
+                loss = 10.0 * F.smooth_l1_loss(fp, gt_p, beta=0.1)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(gen.parameters(), GRAD_CLIP)
             opt.step()
@@ -326,7 +529,7 @@ def train():
 
     # ════════════════ Stage 3: Joint ════════════════
     for p in gen.parameters(): p.requires_grad = True
-    opt = torch.optim.AdamW(gen.parameters(), lr=JT_LR, betas=(0.9, 0.99))
+    opt = make_opt(gen.parameters(), JT_LR)
     gen.set_qat(True)
     # EMA of gen parameters during joint
     ema_state = {k: v.detach().clone() for k, v in gen.state_dict().items()}
@@ -353,7 +556,10 @@ def train():
                 w = 1.0 + (pred_logits.argmax(1) != gt_cls).float() * ERR_BOOST
             seg_loss = 100.0 * (ce * w).mean()
             fp = get_pose6(posenet, pack_pair_yuv6(f1d, f2d).float()).float()
-            pose_loss = 30.0 * F.mse_loss(fp, gt_p)
+            if PERDIM_POSE:
+                pose_loss = 30.0 * (((fp - gt_p) / pose_std).pow(2)).mean()
+            else:
+                pose_loss = 30.0 * F.mse_loss(fp, gt_p)
             loss = seg_loss + pose_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(gen.parameters(), GRAD_CLIP)
