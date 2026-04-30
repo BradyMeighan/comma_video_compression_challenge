@@ -170,11 +170,10 @@ class Head2(nn.Module):
     def __init__(self):
         super().__init__()
         self.r1 = Res(C1)
-        self.r2 = Res(C1)
         self.pre = DSConv(C1, HEAD_HIDDEN)
         self.out = QConv2d(HEAD_HIDDEN, 3, 1, quantize_weight=False)
     def forward(self, f):
-        return torch.sigmoid(self.out(self.pre(self.r2(self.r1(f))))) * 255.0
+        return torch.sigmoid(self.out(self.pre(self.r1(f)))) * 255.0
 
 class Head1(nn.Module):
     def __init__(self):
