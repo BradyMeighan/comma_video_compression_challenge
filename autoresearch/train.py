@@ -277,12 +277,6 @@ def train():
         elapsed = time.time() - t_start
         qat = elapsed > t_anchor_end * QAT_FRAC
         gen.set_qat(qat)
-        if elapsed < t_anchor_end * 0.85:
-            boost = ERR_BOOST
-        elif elapsed < t_anchor_end * 0.95:
-            boost = ERR_BOOST_HI
-        else:
-            boost = ERR_BOOST_HI * 2.0
         # KL→CE schedule
         alpha = min(1.0, elapsed / max(1, t_anchor_end * QAT_FRAC * 0.5))
         kl_w = 0.9 - 0.9 * alpha
@@ -301,8 +295,9 @@ def train():
             pred_logits = segnet(f2d).float()
             ce = F.cross_entropy(pred_logits, gt_cls, reduction='none')
             with torch.no_grad():
-                w = 1.0 + (pred_logits.argmax(1) != gt_cls).float() * boost
-            loss = 100.0 * (kl_w * kl_on_logits(pred_logits, gt_logits) / (MODEL_H*MODEL_W) + ce_w * 0.5 * (ce * w).mean())
+                p_t = torch.exp(-ce.detach()).clamp_max(0.999)
+                focal_w = (1.0 - p_t).pow(2.0)
+            loss = 100.0 * (kl_w * kl_on_logits(pred_logits, gt_logits) / (MODEL_H*MODEL_W) + ce_w * 25.0 * (focal_w * ce).mean())
             loss.backward()
             torch.nn.utils.clip_grad_norm_(gen.parameters(), GRAD_CLIP)
             opt.step()
