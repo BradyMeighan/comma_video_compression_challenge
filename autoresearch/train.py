@@ -179,9 +179,10 @@ class Head1(nn.Module):
     def __init__(self):
         super().__init__()
         self.r1 = FiLMRes(C1, COND_DIM)
+        self.r2 = FiLMRes(C1, COND_DIM)
         self.out = QConv2d(C1, 3, 1, quantize_weight=False)
     def forward(self, f, c):
-        return torch.sigmoid(self.out(self.r1(f, c))) * 255.0
+        return torch.sigmoid(self.out(self.r2(self.r1(f, c), c))) * 255.0
 
 class Generator(nn.Module):
     def __init__(self):
