@@ -193,10 +193,7 @@ class Generator(nn.Module):
             nn.Linear(COND_DIM, COND_DIM), nn.SiLU(),
             nn.Linear(COND_DIM, COND_DIM),
         )
-        # FiLM that modulates trunk features for h1 only (FP4-quantized via QLinear; init zeros)
-        self.trunk_film = QLinear(COND_DIM, C1 * 2)
-        nn.init.zeros_(self.trunk_film.weight)
-        nn.init.zeros_(self.trunk_film.bias)
+        # trunk_film removed: FiLMRes inside Head1 handles pose conditioning directly
         self.h1 = Head1()
         self.h2 = Head2()
 
@@ -209,9 +206,7 @@ class Generator(nn.Module):
         co = coords(mask.shape[0], MODEL_H, MODEL_W, mask.device)
         feat = self.trunk(mask, co)
         cond = self.pose_mlp(pose)
-        g, b = self.trunk_film(cond).unsqueeze(-1).unsqueeze(-1).chunk(2, 1)
-        feat_h1 = feat * (1 + g) + b
-        return self.h1(feat_h1, cond), self.h2(feat)
+        return self.h1(feat, cond), self.h2(feat)
 
 # ══════════════════════════════════════════════════════════════════════
 # TRAINING LOOP
