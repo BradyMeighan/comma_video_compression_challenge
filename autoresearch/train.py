@@ -123,7 +123,7 @@ class Res(nn.Module):
         return self.act(x + self.norm(self.pw2(self.dw2(self.c1(x)))))
 
 class FiLMRes(nn.Module):
-    """Residual block with FiLM conditioning."""
+    """Residual block with FiLM conditioning. FiLM is FP4-quantized + zero-init."""
     def __init__(self, ch, cd):
         super().__init__()
         self.c1 = DSConv(ch, ch)
@@ -131,7 +131,9 @@ class FiLMRes(nn.Module):
         self.dw2 = QConv2d(ch, mid, 3, padding=1, groups=ch, bias=False)
         self.pw2 = QConv2d(mid, ch, 1, bias=True)
         self.norm = nn.GroupNorm(min(2, ch), ch)
-        self.film = nn.Linear(cd, ch * 2)
+        self.film = QLinear(cd, ch * 2)
+        nn.init.zeros_(self.film.weight)
+        nn.init.zeros_(self.film.bias)
         self.act = nn.SiLU(inplace=True)
     def forward(self, x, cond):
         r = self.norm(self.pw2(self.dw2(self.c1(x))))
