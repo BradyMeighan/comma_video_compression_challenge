@@ -353,6 +353,11 @@ def train():
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
 
+    # ── A100/H100 perf knobs (free speedup, safe with our QAT) ──
+    torch.backends.cudnn.benchmark = True            # autotune kernels for our shapes (~10-20% speedup)
+    torch.backends.cuda.matmul.allow_tf32 = True     # TF32 matmul on Ampere+ (already default, explicit)
+    torch.backends.cudnn.allow_tf32 = True           # TF32 conv on Ampere+ (already default, explicit)
+
     # ── Load data (cached, <1s after first run) ──
     data = load_data_full(device) if USE_FULL_DATA else load_data(device)
     rgb = data["train_rgb"]
