@@ -44,7 +44,14 @@ USE_FULL_DATA   = bool(int(os.environ.get("FULL_DATA", "0")))
 _budget_override = os.environ.get("TRAIN_BUDGET_SEC_OVERRIDE")
 if _budget_override:
     TRAIN_BUDGET_SEC = int(_budget_override)
-print(f"[config] CONFIG={CONFIG} budget={TRAIN_BUDGET_SEC}s full_data={USE_FULL_DATA}")
+
+# HP overrides for tuning runs (env-var driven)
+EMA_DECAY_OVERRIDE  = float(os.environ.get("EMA_DECAY", "0.9"))
+COSINE_LR           = bool(int(os.environ.get("COSINE_LR", "0")))
+GRAD_CLIP_OVERRIDE  = float(os.environ.get("GRAD_CLIP_OVERRIDE", "0"))  # 0 = use default
+CHECKPOINT_INTERVAL_SEC = int(os.environ.get("CHECKPOINT_INTERVAL_SEC", "0"))  # 0 = disabled
+print(f"[config] CONFIG={CONFIG} budget={TRAIN_BUDGET_SEC}s full_data={USE_FULL_DATA} "
+      f"ema={EMA_DECAY_OVERRIDE} cosine_lr={COSINE_LR} grad_clip={GRAD_CLIP_OVERRIDE or 'default'}")
 
 # ══════════════════════════════════════════════════════════════════════
 # HYPERPARAMETERS — tune these
@@ -57,6 +64,8 @@ JT_LR         = 5e-5       # joint stage learning rate
 ERR_BOOST     = 9.0        # error boosting multiplier (normal)
 ERR_BOOST_HI  = 49.0       # error boosting multiplier (late anchor)
 GRAD_CLIP     = 0.5
+if GRAD_CLIP_OVERRIDE > 0:
+    GRAD_CLIP = GRAD_CLIP_OVERRIDE
 QAT_FRAC      = 0.7        # fraction of anchor stage before enabling QAT
 
 # Time allocation (fraction of TRAIN_BUDGET_SEC)
@@ -376,6 +385,17 @@ def train():
             return Lion(list(params), lr=lr_val / 3.0, betas=(0.9, 0.99))
         return torch.optim.AdamW(list(params), lr=lr_val, betas=(0.9, 0.99))
 
+    def cosine_lr_factor(progress):
+        """Cosine decay factor in [0.1, 1.0] for progress in [0, 1]."""
+        p = max(0.0, min(1.0, progress))
+        return 0.1 + 0.9 * (0.5 * (1.0 + math.cos(math.pi * p)))
+
+    def apply_cosine(opt, init_lr, progress):
+        if COSINE_LR:
+            f = cosine_lr_factor(progress)
+            for g in opt.param_groups:
+                g['lr'] = init_lr * f
+
     def boundary_mask(gt_cls):
         """Returns (B,H,W) float mask, 1.0 at class boundaries."""
         gt_pad = F.pad(gt_cls.unsqueeze(1).float(), (1, 1, 1, 1), mode='replicate')
@@ -387,14 +407,17 @@ def train():
     if JOINT_ONLY:
         for p in gen.parameters(): p.requires_grad = True
         opt = make_opt(gen.parameters(), LR)
+        joint_only_init_lr = opt.param_groups[0]['lr']
         ema_state = {k: v.detach().clone() for k, v in gen.state_dict().items()}
-        ema_decay = 0.9
+        ema_decay = EMA_DECAY_OVERRIDE
         total_budget = TRAIN_BUDGET_SEC * 0.95
+        last_ckpt_time = time.time()
 
         while time.time() - t_start < total_budget:
             gen.train()
             elapsed = time.time() - t_start
             progress = elapsed / total_budget
+            apply_cosine(opt, joint_only_init_lr, progress)
             qat = progress > 0.4  # QAT after 40% of training
             gen.set_qat(qat)
             # KL→CE schedule (early)
@@ -437,6 +460,12 @@ def train():
                         else:
                             ema_state[k].copy_(v)
             epoch += 1
+            # Periodic checkpoint to a sibling .ckpt file
+            ckpt_path = os.environ.get("SAVE_MODEL_PATH", "")
+            if ckpt_path and CHECKPOINT_INTERVAL_SEC > 0 and (time.time() - last_ckpt_time) > CHECKPOINT_INTERVAL_SEC:
+                torch.save(ema_state, ckpt_path + ".ckpt")
+                last_ckpt_time = time.time()
+                print(f"[ckpt] saved EMA state to {ckpt_path}.ckpt at epoch {epoch}")
 
         train_time = time.time() - t_start
         print(f"joint_only_epochs: {epoch}")
@@ -450,6 +479,10 @@ def train():
         for k in ["score", "seg_term", "pose_term", "rate_term", "model_bytes", "total_bytes", "n_params"]:
             v = result[k]
             print(f"{k}: {v:.6f}" if isinstance(v, float) else f"{k}: {v}")
+        save_path = os.environ.get("SAVE_MODEL_PATH", "")
+        if save_path:
+            torch.save(gen.state_dict(), save_path)
+            print(f"saved_model: {save_path}")
         del gen, data; gpu_cleanup()
         return
 
@@ -457,10 +490,12 @@ def train():
     for p in gen.h1.parameters(): p.requires_grad = False
     for p in gen.pose_mlp.parameters(): p.requires_grad = False
     opt = make_opt(filter(lambda p: p.requires_grad, gen.parameters()), LR)
+    anchor_init_lr = opt.param_groups[0]['lr']
 
     while time.time() - t_start < t_anchor_end:
         gen.train()
         elapsed = time.time() - t_start
+        apply_cosine(opt, anchor_init_lr, elapsed / max(1e-3, t_anchor_end))
         qat = elapsed > t_anchor_end * QAT_FRAC
         gen.set_qat(qat)
         # KL→CE schedule
@@ -502,9 +537,12 @@ def train():
     for p in gen.h2.parameters(): p.requires_grad = False
     gen.trunk.eval(); gen.h2.eval()
     opt = make_opt(filter(lambda p: p.requires_grad, gen.parameters()), FT_LR)
+    ft_init_lr = opt.param_groups[0]['lr']
     gen.set_qat(True)
 
     while time.time() - t_start < t_ft_end:
+        ft_progress = (time.time() - t_start - t_anchor_end) / max(1e-3, t_ft_end - t_anchor_end)
+        apply_cosine(opt, ft_init_lr, ft_progress)
         gen.h1.train(); gen.pose_mlp.train()
         for b_rgb, b_mask, b_pose in make_batches(rgb, masks, poses, 1000 + epoch, device):
             batch = einops.rearrange(b_rgb, "b t h w c -> b t c h w").float()
@@ -530,12 +568,16 @@ def train():
     # ════════════════ Stage 3: Joint ════════════════
     for p in gen.parameters(): p.requires_grad = True
     opt = make_opt(gen.parameters(), JT_LR)
+    jt_init_lr = opt.param_groups[0]['lr']
     gen.set_qat(True)
     # EMA of gen parameters during joint
     ema_state = {k: v.detach().clone() for k, v in gen.state_dict().items()}
-    ema_decay = 0.9
+    ema_decay = EMA_DECAY_OVERRIDE
+    last_ckpt_time = time.time()
 
     while time.time() - t_start < t_jt_end:
+        jt_progress = (time.time() - t_start - t_ft_end) / max(1e-3, t_jt_end - t_ft_end)
+        apply_cosine(opt, jt_init_lr, jt_progress)
         gen.train()
         for b_rgb, b_mask, b_pose in make_batches(rgb, masks, poses, 2000 + epoch, device):
             batch = einops.rearrange(b_rgb, "b t h w c -> b t c h w").float()
@@ -571,6 +613,12 @@ def train():
                     else:
                         ema_state[k].copy_(v)
         epoch += 1
+        # Periodic checkpoint
+        ckpt_path = os.environ.get("SAVE_MODEL_PATH", "")
+        if ckpt_path and CHECKPOINT_INTERVAL_SEC > 0 and (time.time() - last_ckpt_time) > CHECKPOINT_INTERVAL_SEC:
+            torch.save(ema_state, ckpt_path + ".ckpt")
+            last_ckpt_time = time.time()
+            print(f"[ckpt] saved EMA state at joint epoch {epoch - anchor_ep - ft_ep}")
 
     jt_ep = epoch - anchor_ep - ft_ep
     train_time = time.time() - t_start
@@ -593,6 +641,12 @@ def train():
     for k in ["score", "seg_term", "pose_term", "rate_term", "model_bytes", "total_bytes", "n_params"]:
         v = result[k]
         print(f"{k}: {v:.6f}" if isinstance(v, float) else f"{k}: {v}")
+
+    # ── Save model state_dict if requested (set SAVE_MODEL_PATH env var) ──
+    save_path = os.environ.get("SAVE_MODEL_PATH", "")
+    if save_path:
+        torch.save(gen.state_dict(), save_path)
+        print(f"saved_model: {save_path}")
 
     # ── Clean exit ──
     del gen, data
