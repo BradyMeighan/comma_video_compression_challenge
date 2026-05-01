@@ -115,19 +115,25 @@ class Lion(torch.optim.Optimizer):
         return loss
 
 def load_data_full(device):
-    """Full-dataset variant: split all 600 pairs into 500 train / 100 val. Cached separately."""
+    """Full-dataset variant: train AND eval on ALL 600 pairs (no held-out — contest tests on the same video).
+    Cache stores only train_rgb (~3.6GB); val mirrors train at load (no duplicate memory)."""
     from tqdm import tqdm
     from frame_utils import AVVideoDataset
     from modules import SegNet, PoseNet, segnet_sd_path, posenet_sd_path
     from safetensors.torch import load_file
 
     CACHE_DIR.mkdir(exist_ok=True)
-    cache_file = CACHE_DIR / "full_split_500_100.pt"
+    cache_file = CACHE_DIR / "full_split_600all.pt"
     if cache_file.exists():
-        print(f"[full] Loading cached full data ({cache_file.stat().st_size // 1024 // 1024}MB)")
-        return torch.load(cache_file, map_location="cpu", weights_only=True)
+        print(f"[full] Loading cached full data ({cache_file.stat().st_size // 1024 // 1024}MB) — 600/600 all-pairs")
+        d = torch.load(cache_file, map_location="cpu", weights_only=True)
+        # Mirror train→val (same data; we want contest-equivalent eval)
+        d["val_rgb"]   = d["train_rgb"]
+        d["val_masks"] = d["train_masks"]
+        d["val_poses"] = d["train_poses"]
+        return d
 
-    print("[full] Building full data cache (first run, ~3min)...")
+    print("[full] Building full data cache (first run, ~3min) — all 600 pairs as train, no held-out...")
     t0 = time.time()
     files = [l.strip() for l in (ROOT / "public_test_video_names.txt").read_text().splitlines() if l.strip()]
     ds = AVVideoDataset(files, data_dir=ROOT / "videos", batch_size=16,
@@ -137,41 +143,34 @@ def load_data_full(device):
     all_rgb = []
     for _, _, batch in tqdm(dl, desc="[full] Loading video", leave=False):
         all_rgb.append(batch)
-    all_rgb = torch.cat(all_rgb, 0)
+    all_rgb = torch.cat(all_rgb, 0).contiguous()
     print(f"[full] Loaded {all_rgb.shape[0]} pairs in {time.time()-t0:.1f}s")
-
-    g = torch.Generator(); g.manual_seed(42)
-    idx = torch.randperm(all_rgb.shape[0], generator=g)
-    train_idx, val_idx = idx[:500], idx[500:600]
-    train_rgb = all_rgb[train_idx].contiguous()
-    val_rgb = all_rgb[val_idx].contiguous()
-    del all_rgb; gc.collect()
 
     segnet = SegNet().eval().to(device); segnet.load_state_dict(load_file(segnet_sd_path, device=str(device)))
     posenet = PoseNet().eval().to(device); posenet.load_state_dict(load_file(posenet_sd_path, device=str(device)))
 
-    def extract(rgb_subset, label):
-        masks_l, poses_l = [], []
-        BS = 8
-        with torch.inference_mode():
-            for i in tqdm(range(0, rgb_subset.shape[0], BS), desc=f"[full] {label}"):
-                b = rgb_subset[i:i+BS].to(device).float()
-                bc = einops.rearrange(b, 'b t h w c -> b t c h w')
-                r2 = F.interpolate(bc[:, 1], (MODEL_H, MODEL_W), mode='bilinear', align_corners=False)
-                masks_l.append(segnet(r2).float().argmax(1).to(torch.uint8).cpu())
-                poses_l.append(get_pose6(posenet, posenet.preprocess_input(bc)).float().cpu())
-        return torch.cat(masks_l, 0).contiguous(), torch.cat(poses_l, 0).contiguous()
+    masks_l, poses_l = [], []
+    BS = 8
+    with torch.inference_mode():
+        for i in tqdm(range(0, all_rgb.shape[0], BS), desc="[full] extract"):
+            b = all_rgb[i:i+BS].to(device).float()
+            bc = einops.rearrange(b, 'b t h w c -> b t c h w')
+            r2 = F.interpolate(bc[:, 1], (MODEL_H, MODEL_W), mode='bilinear', align_corners=False)
+            masks_l.append(segnet(r2).float().argmax(1).to(torch.uint8).cpu())
+            poses_l.append(get_pose6(posenet, posenet.preprocess_input(bc)).float().cpu())
+    train_masks = torch.cat(masks_l, 0).contiguous()
+    train_poses = torch.cat(poses_l, 0).contiguous()
 
-    train_masks, train_poses = extract(train_rgb, "train")
-    val_masks, val_poses = extract(val_rgb, "val")
     del segnet, posenet; gpu_cleanup()
 
-    data = {
-        "train_rgb": train_rgb, "train_masks": train_masks, "train_poses": train_poses,
-        "val_rgb": val_rgb,     "val_masks": val_masks,     "val_poses": val_poses,
-    }
+    # Save only train (val will mirror train at load — saves disk)
+    data = {"train_rgb": all_rgb, "train_masks": train_masks, "train_poses": train_poses}
     torch.save(data, cache_file)
     print(f"[full] Cached {cache_file.stat().st_size // 1024 // 1024}MB in {time.time()-t0:.1f}s")
+    # Mirror for return
+    data["val_rgb"] = all_rgb
+    data["val_masks"] = train_masks
+    data["val_poses"] = train_poses
     return data
 
 # ══════════════════════════════════════════════════════════════════════
@@ -497,12 +496,18 @@ def train():
     opt = make_opt(filter(lambda p: p.requires_grad, gen.parameters()), LR)
     anchor_init_lr = opt.param_groups[0]['lr']
 
+    last_log_time = time.time()
+    last_loss = float('nan')
     while time.time() - t_start < t_anchor_end:
         gen.train()
         elapsed = time.time() - t_start
         apply_cosine(opt, anchor_init_lr, elapsed / max(1e-3, t_anchor_end))
         qat = elapsed > t_anchor_end * QAT_FRAC
         gen.set_qat(qat)
+        # Progress log every 60s
+        if time.time() - last_log_time > 60:
+            print(f"[anchor] elapsed={int(elapsed)}s/{int(t_anchor_end)}s ({100*elapsed/t_anchor_end:.0f}%) epoch={epoch} qat={qat} lr={opt.param_groups[0]['lr']:.2e} last_loss={last_loss:.4f}", flush=True)
+            last_log_time = time.time()
         # KL→CE schedule
         alpha = min(1.0, elapsed / max(1, t_anchor_end * QAT_FRAC * 0.5))
         kl_w = 0.9 - 0.9 * alpha
@@ -531,10 +536,11 @@ def train():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(gen.parameters(), GRAD_CLIP)
             opt.step()
+            last_loss = loss.item()
         epoch += 1
 
     anchor_ep = epoch
-    print(f"anchor_epochs: {anchor_ep}")
+    print(f"anchor_epochs: {anchor_ep}", flush=True)
 
     # ════════════════ Stage 2: Finetune (frame1 PoseNet) ════════════════
     for p in gen.parameters(): p.requires_grad = True
@@ -545,9 +551,14 @@ def train():
     ft_init_lr = opt.param_groups[0]['lr']
     gen.set_qat(True)
 
+    last_log_time = time.time()
+    last_loss = float('nan')
     while time.time() - t_start < t_ft_end:
         ft_progress = (time.time() - t_start - t_anchor_end) / max(1e-3, t_ft_end - t_anchor_end)
         apply_cosine(opt, ft_init_lr, ft_progress)
+        if time.time() - last_log_time > 60:
+            print(f"[finetune] ft_elapsed={int(time.time()-t_start-t_anchor_end)}s ({100*ft_progress:.0f}%) epoch={epoch-anchor_ep} lr={opt.param_groups[0]['lr']:.2e} last_loss={last_loss:.4f}", flush=True)
+            last_log_time = time.time()
         gen.h1.train(); gen.pose_mlp.train()
         for b_rgb, b_mask, b_pose in make_batches(rgb, masks, poses, 1000 + epoch, device):
             batch = einops.rearrange(b_rgb, "b t h w c -> b t c h w").float()
@@ -565,10 +576,11 @@ def train():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(gen.parameters(), GRAD_CLIP)
             opt.step()
+            last_loss = loss.item()
         epoch += 1
 
     ft_ep = epoch - anchor_ep
-    print(f"finetune_epochs: {ft_ep}")
+    print(f"finetune_epochs: {ft_ep}", flush=True)
 
     # ════════════════ Stage 3: Joint ════════════════
     for p in gen.parameters(): p.requires_grad = True
@@ -580,9 +592,14 @@ def train():
     ema_decay = EMA_DECAY_OVERRIDE
     last_ckpt_time = time.time()
 
+    last_log_time = time.time()
+    last_seg = float('nan'); last_pose = float('nan')
     while time.time() - t_start < t_jt_end:
         jt_progress = (time.time() - t_start - t_ft_end) / max(1e-3, t_jt_end - t_ft_end)
         apply_cosine(opt, jt_init_lr, jt_progress)
+        if time.time() - last_log_time > 60:
+            print(f"[joint] jt_elapsed={int(time.time()-t_start-t_ft_end)}s ({100*jt_progress:.0f}%) epoch={epoch-anchor_ep-ft_ep} lr={opt.param_groups[0]['lr']:.2e} last_seg={last_seg:.4f} last_pose={last_pose:.4f}", flush=True)
+            last_log_time = time.time()
         gen.train()
         for b_rgb, b_mask, b_pose in make_batches(rgb, masks, poses, 2000 + epoch, device):
             batch = einops.rearrange(b_rgb, "b t h w c -> b t c h w").float()
@@ -608,6 +625,7 @@ def train():
             else:
                 pose_loss = 30.0 * F.mse_loss(fp, gt_p)
             loss = seg_loss + pose_loss
+            last_seg = seg_loss.item(); last_pose = pose_loss.item()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(gen.parameters(), GRAD_CLIP)
             opt.step()
@@ -627,7 +645,7 @@ def train():
 
     jt_ep = epoch - anchor_ep - ft_ep
     train_time = time.time() - t_start
-    print(f"joint_epochs: {jt_ep}")
+    print(f"joint_epochs: {jt_ep}", flush=True)
     print(f"total_epochs: {epoch}")
     print(f"training_sec: {train_time:.1f}")
 
