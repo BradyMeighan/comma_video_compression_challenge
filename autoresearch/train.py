@@ -497,6 +497,7 @@ def train():
     anchor_init_lr = opt.param_groups[0]['lr']
 
     last_log_time = time.time()
+    last_ckpt_time = time.time()
     last_loss = float('nan')
     while time.time() - t_start < t_anchor_end:
         gen.train()
@@ -508,6 +509,12 @@ def train():
         if time.time() - last_log_time > 60:
             print(f"[anchor] elapsed={int(elapsed)}s/{int(t_anchor_end)}s ({100*elapsed/t_anchor_end:.0f}%) epoch={epoch} qat={qat} lr={opt.param_groups[0]['lr']:.2e} last_loss={last_loss:.4f}", flush=True)
             last_log_time = time.time()
+        # Periodic save (no EMA yet — save raw weights)
+        ckpt_path = os.environ.get("SAVE_MODEL_PATH", "")
+        if ckpt_path and CHECKPOINT_INTERVAL_SEC > 0 and (time.time() - last_ckpt_time) > CHECKPOINT_INTERVAL_SEC:
+            torch.save(gen.state_dict(), ckpt_path + ".ckpt")
+            last_ckpt_time = time.time()
+            print(f"[ckpt] anchor: saved gen.state_dict to {ckpt_path}.ckpt at epoch {epoch}", flush=True)
         # KL→CE schedule
         alpha = min(1.0, elapsed / max(1, t_anchor_end * QAT_FRAC * 0.5))
         kl_w = 0.9 - 0.9 * alpha
@@ -541,6 +548,10 @@ def train():
 
     anchor_ep = epoch
     print(f"anchor_epochs: {anchor_ep}", flush=True)
+    ckpt_path = os.environ.get("SAVE_MODEL_PATH", "")
+    if ckpt_path:
+        torch.save(gen.state_dict(), ckpt_path + ".anchor.pt")
+        print(f"[ckpt] saved end-of-anchor weights to {ckpt_path}.anchor.pt", flush=True)
 
     # ════════════════ Stage 2: Finetune (frame1 PoseNet) ════════════════
     for p in gen.parameters(): p.requires_grad = True
@@ -552,6 +563,7 @@ def train():
     gen.set_qat(True)
 
     last_log_time = time.time()
+    last_ckpt_time = time.time()
     last_loss = float('nan')
     while time.time() - t_start < t_ft_end:
         ft_progress = (time.time() - t_start - t_anchor_end) / max(1e-3, t_ft_end - t_anchor_end)
@@ -559,6 +571,11 @@ def train():
         if time.time() - last_log_time > 60:
             print(f"[finetune] ft_elapsed={int(time.time()-t_start-t_anchor_end)}s ({100*ft_progress:.0f}%) epoch={epoch-anchor_ep} lr={opt.param_groups[0]['lr']:.2e} last_loss={last_loss:.4f}", flush=True)
             last_log_time = time.time()
+        ckpt_path = os.environ.get("SAVE_MODEL_PATH", "")
+        if ckpt_path and CHECKPOINT_INTERVAL_SEC > 0 and (time.time() - last_ckpt_time) > CHECKPOINT_INTERVAL_SEC:
+            torch.save(gen.state_dict(), ckpt_path + ".ckpt")
+            last_ckpt_time = time.time()
+            print(f"[ckpt] finetune: saved gen.state_dict to {ckpt_path}.ckpt at epoch {epoch-anchor_ep}", flush=True)
         gen.h1.train(); gen.pose_mlp.train()
         for b_rgb, b_mask, b_pose in make_batches(rgb, masks, poses, 1000 + epoch, device):
             batch = einops.rearrange(b_rgb, "b t h w c -> b t c h w").float()
@@ -581,6 +598,10 @@ def train():
 
     ft_ep = epoch - anchor_ep
     print(f"finetune_epochs: {ft_ep}", flush=True)
+    ckpt_path = os.environ.get("SAVE_MODEL_PATH", "")
+    if ckpt_path:
+        torch.save(gen.state_dict(), ckpt_path + ".finetune.pt")
+        print(f"[ckpt] saved end-of-finetune weights to {ckpt_path}.finetune.pt", flush=True)
 
     # ════════════════ Stage 3: Joint ════════════════
     for p in gen.parameters(): p.requires_grad = True
