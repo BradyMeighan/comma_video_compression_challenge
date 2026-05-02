@@ -15,7 +15,10 @@ Env vars:
   EMA_DECAY        : EMA decay rate (default: 0.999)
   COSINE_LR        : 1 = cosine decay LR over budget (default: 1)
   GRAD_CLIP_OVERRIDE : (default: 0.5)
-  CHECKPOINT_INTERVAL_SEC : periodic checkpoint frequency (default: 600 = 10min)
+  CHECKPOINT_INTERVAL_SEC : periodic time-based checkpoint frequency (default: 600 = 10min)
+                            saves to {SAVE_MODEL_PATH}.ckpt (overwrites)
+  CHECKPOINT_EPOCH_INTERVAL : periodic epoch-based checkpoint frequency (default: 0 = disabled)
+                              saves to {SAVE_MODEL_PATH}.e{epoch}.ckpt (numbered, keeps history)
   FULL_DATA        : 1 = use 600 pairs (default: 1)
   CONFIG           : architecture config (default: B for boundary+Lion)
   BATCH_SIZE       : batch size (default 4, 3090-safe; bump to 8 for A100, 8-16 for H100)
@@ -55,6 +58,7 @@ EMA_DECAY = float(os.environ["EMA_DECAY"])
 COSINE_LR = bool(int(os.environ["COSINE_LR"]))
 GRAD_CLIP = float(os.environ["GRAD_CLIP_OVERRIDE"])
 CHECKPOINT_INTERVAL_SEC = int(os.environ["CHECKPOINT_INTERVAL_SEC"])
+CHECKPOINT_EPOCH_INTERVAL = int(os.environ.get("CHECKPOINT_EPOCH_INTERVAL", "0"))
 USE_BOUNDARY = os.environ.get("CONFIG", "B").upper() in ("B", "C")
 
 if not MODEL_PATH or not Path(MODEL_PATH).exists():
@@ -173,11 +177,16 @@ def main():
                     else:
                         ema_state[k].copy_(v)
         epoch += 1
-        # Periodic checkpoint
+        # Periodic time-based checkpoint (overwrites)
         if CHECKPOINT_INTERVAL_SEC > 0 and (time.time() - last_ckpt_time) > CHECKPOINT_INTERVAL_SEC:
             torch.save(ema_state, SAVE_MODEL_PATH + ".ckpt")
             last_ckpt_time = time.time()
             print(f"[ckpt] saved EMA to {SAVE_MODEL_PATH}.ckpt at epoch {epoch}", flush=True)
+        # Periodic epoch-based checkpoint (numbered, keeps history)
+        if CHECKPOINT_EPOCH_INTERVAL > 0 and epoch % CHECKPOINT_EPOCH_INTERVAL == 0:
+            ep_ckpt = f"{SAVE_MODEL_PATH}.e{epoch}.ckpt"
+            torch.save(ema_state, ep_ckpt)
+            print(f"[ckpt-ep] saved EMA to {ep_ckpt}", flush=True)
 
     train_time = time.time() - t_start
     print(f"[continue] Done. {epoch} epochs in {train_time:.1f}s")
