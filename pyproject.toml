@@ -11,6 +11,10 @@ dependencies = [
   "tqdm",
   "pillow",
   "av",
+  "charset-normalizer",
+  "requests",
+  "urllib3",
+  "brotli",
 ]
 
 [dependency-groups]
