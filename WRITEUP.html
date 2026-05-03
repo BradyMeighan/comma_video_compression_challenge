@@ -1,0 +1,195 @@
+<!doctype html><html><head><meta charset='utf-8'><title>WRITEUP</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    max-width: 980px; margin: 0 auto; padding: 32px 48px;
+    color: #1f2328; background: #ffffff; line-height: 1.55;
+  }
+  h1 { border-bottom: 1px solid #d1d9e0; padding-bottom: 0.3em; font-size: 2em; }
+  h2 { border-bottom: 1px solid #d1d9e0; padding-bottom: 0.3em; margin-top: 1.5em; }
+  h3 { margin-top: 1.4em; }
+  hr { border: none; border-top: 2px solid #d1d9e0; margin: 32px 0; }
+  a { color: #0969da; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    background: #afb8c133; padding: 0.2em 0.4em; border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+    font-size: 85%;
+  }
+  pre {
+    background: #f6f8fa; padding: 16px; border-radius: 6px; overflow-x: auto;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+    font-size: 85%; line-height: 1.45;
+  }
+  pre code { background: none; padding: 0; font-size: 100%; }
+  img { max-width: 100%; border-radius: 6px; display: block; margin: 16px auto; }
+  table { border-collapse: collapse; margin: 16px 0; display: block; overflow-x: auto; }
+  th, td { padding: 6px 13px; border: 1px solid #d1d9e0; }
+  th { background: #f6f8fa; font-weight: 600; }
+  tr:nth-child(2n) { background: #f6f8fa; }
+  blockquote { border-left: 4px solid #d1d9e0; padding: 0 1em; color: #59636e; margin: 0; }
+  ul, ol { padding-left: 2em; }
+</style>
+</head><body><h1 id="from-439-030-a-small-mask-conditioned-generator-autoresearch-sidecar-patches">From 4.39 → 0.30: a small mask-conditioned generator + autoresearch + sidecar patches</h1>
+<p><strong>Final score: ~0.30</strong> (raw model 0.33 + sidecar 0.2999, both reproducible from this branch).
+<strong>Compression rate: 7.6×</strong> (uncompressed 37.5 MB → compressed 286 KB).
+<strong>Approach:</strong> train a tiny FP4-quantized generator that reconstructs frames from a stored 5-class semantic mask + 6-D pose vector, then optionally repair the worst pairs with a few KB of byte-level "sidecar" patches that exploit the eval pipeline's own gradients.</p>
+<p><img alt="score journey" src="writeup_assets/score_journey.png" /></p>
+<hr />
+<h2 id="1-the-model">1. The model</h2>
+<p>The challenge scores submissions by <code>100 × seg_dist + √(10 × pose_dist) + 25 × rate</code>, where seg/pose distortions are measured by frozen SegNet and PoseNet "discriminators". Two facts shaped the entire architecture:</p>
+<ol>
+<li><strong>SegNet only sees frame 2</strong> of each pair (<a href="modules.py">modules.py:108</a>). So frame 2 needs to look "right" to a U-Net+EfficientNet, but <strong>frame 1 doesn't have to look like a frame at all</strong> — it just needs to make <code>posenet(yuv6(f1) ⊕ yuv6(f2))</code> output the correct 6-D pose vector.</li>
+<li><strong>Conv2d weights are stored as FP4</strong> in <code>prepare.estimate_model_bytes</code> (4-bit codebook + 16-bit per-block scale, then brotli), but <code>nn.Linear</code> is stored at FP16. So Linear capacity costs ~4× more per parameter than Conv2d capacity — but capacity in pose-conditioning Linears (FiLM, MLP) is <em>much</em> cheaper to compress than capacity in the trunk.</li>
+</ol>
+<p>We compress each video as a per-pair tuple <code>(mask, pose)</code> plus a single shared 54 KB generator. The generator is a 92 K-parameter U-Net with two heads:</p>
+<p><img alt="architecture" src="writeup_assets/architecture.png" /></p>
+<p>The trunk is shared between both frames; only Head 1 (frame 1, the pose-target frame) gets pose conditioning via two FiLMRes blocks, with the FiLM linears wrapped in 1×1 <code>QConv2d</code> so they get FP4 byte treatment instead of FP16. Quantization-Aware Training (QAT) kicks in at 70% of the anchor stage so the model learns to live with the FP4 codebook <code>[0, 0.5, 1, 1.5, 2, 3, 4, 6]</code>.</p>
+<p>What the trained generator actually produces:</p>
+<p><img alt="hero pair 60" src="writeup_assets/hero_pair_60.png" /></p>
+<p>The reconstructions are visually unrecognizable — saturated, cartoon-like, with hallucinated colors — but they hit <code>seg_dist ≈ 0.027</code> and <code>pose_dist ≈ 0.08</code> on the held-out 600-pair test set. This is the central trick: when your evaluator is a neural network, you don't optimize for pixel fidelity, you optimize for whatever activation the evaluator happens to read out.</p>
+<p><img alt="generator output animated" src="writeup_assets/gen_reconstruction.gif" /></p>
+<p>The road geometry, sky/foliage band, and lane markings are clearly visible in the right column despite never being supervised by a pixel-level loss — they emerge purely as the <em>easiest</em> way for the generator to satisfy SegNet's argmax. A static grid with daytime/dusk pairs:</p>
+<p><img alt="generator grid" src="writeup_assets/gen_compare_grid.png" /></p>
+<hr />
+<h2 id="2-karpathy-style-autoresearch-loop">2. Karpathy-style autoresearch loop</h2>
+<p>The generator's architecture wasn't designed by hand — it was found by ~195 short-budget proxy experiments, each a self-contained 5-minute training run. The loop follows Karpathy's nanoGPT-speedrun rule: <strong>search algorithms, not hyperparameters</strong>. An LLM agent reads the previous result, proposes a single change to <code>train.py</code> (architecture, loss formulation, optimizer choice), runs the proxy, decides keep/revert based on whether the score improved by more than the run-to-run noise floor (≈ ±0.15), commits or resets, and repeats. Hyperparameter values (LR, EMA decay, schedule timings) are deliberately <em>not</em> tuned in the loop — those rarely transfer from a 5-minute proxy to a 12-hour full run, while algorithmic wins usually do.</p>
+<p><img alt="autoresearch progression" src="writeup_assets/autoresearch_progression.png" /></p>
+<p>The chart shows the agent converging from baseline 2.14 to 1.36 over 195 experiments (green = kept, gray = reverted, red = running best). The vast majority of attempts fail; a handful of architectural decisions did most of the work. The keepers, in order:</p>
+<table>
+<thead>
+<tr>
+<th>exp</th>
+<th>change</th>
+<th>proxy score</th>
+<th>category</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>11</td>
+<td>pose-finetune loss MSE → SmoothL1 (β=0.1)</td>
+<td>1.57</td>
+<td>algorithmic</td>
+</tr>
+<tr>
+<td>17</td>
+<td>pose_mlp 2-layer → 3-layer</td>
+<td>1.40</td>
+<td>architectural</td>
+</tr>
+<tr>
+<td>37</td>
+<td>Head1 concat-pose merge</td>
+<td>1.46</td>
+<td>architectural</td>
+</tr>
+<tr>
+<td>81</td>
+<td>3-step ERR_BOOST schedule</td>
+<td>1.39</td>
+<td>schedule</td>
+</tr>
+<tr>
+<td>112</td>
+<td>COND_DIM 48 → 64</td>
+<td>1.52</td>
+<td>architectural</td>
+</tr>
+<tr>
+<td>118</td>
+<td>trunk-output FiLM modulating h1 only</td>
+<td>1.42</td>
+<td>architectural</td>
+</tr>
+<tr>
+<td>168</td>
+<td>trunk_film FP4 via QLinear</td>
+<td>1.61</td>
+<td>rate (algorithmic)</td>
+</tr>
+<tr>
+<td>169</td>
+<td>FiLMRes.film FP4 zero-init</td>
+<td>1.51</td>
+<td>rate (algorithmic)</td>
+</tr>
+<tr>
+<td>171</td>
+<td>focal loss (γ=2) replaces ERR_BOOST</td>
+<td>1.45</td>
+<td>algorithmic</td>
+</tr>
+<tr>
+<td>172</td>
+<td>dual-FiLM Head1 with zero-init second FiLM</td>
+<td>1.45</td>
+<td>architectural</td>
+</tr>
+<tr>
+<td>182</td>
+<td>dual FiLMRes Head1 (final shape)</td>
+<td><strong>1.36</strong></td>
+<td>architectural</td>
+</tr>
+</tbody>
+</table>
+<p>The two highest-leverage <em>categories</em> turned out to be:</p>
+<ul>
+<li><strong>FP4-wrapping zero-initialized Linears</strong> (exp 168/169). Wrapping a <code>Linear</code> in a 1×1 <code>QConv2d</code> saves ~9 KB per Linear because Conv weights are charged at FP4 (~5 bits/param) while plain Linears are charged at FP16. The constraint is that the init must be near-zero — Kaiming-initialized pose_mlp Linears tank pose at FP4 (exp 170 hit 1.5 pose). Total rate savings from this trick alone: ~25 KB → score −0.013.</li>
+<li><strong>Focal loss + boundary weighting</strong> for the segmentation objective. The eval metric is <code>argmax-disagreement</code>, not cross-entropy (<a href="modules.py">modules.py:111</a>) — the eval doesn't care if the wrong class has high logit, only that the right class has the highest. Focal loss (γ=2) downweights already-confident pixels and concentrates gradient on the hard ones, and <code>5×</code> boundary weighting concentrates further on the pixels where a single logit perturbation flips an argmax. Replicated wins across exp 164/171/186.</li>
+</ul>
+<p>Things that <em>clearly</em> didn't work and shouldn't be retried by anyone forking this repo: deeper or wider trunks (cost epochs, seg crashes), pose-conditioning the frame-2 head (gradients from pose pull the trunk away from seg), Fourier pose encoding, optical-flow warps, residual <code>f1 = f2 + δ</code>, EMA decay &gt; 0.95 on the proxy, and ~30 other variants documented in <a href="autoresearch/results.tsv">autoresearch/results.tsv</a>.</p>
+<hr />
+<h2 id="3-training-a100-targeted-3090-fine-tune">3. Training: A100 + targeted 3090 fine-tune</h2>
+<p>Once the architecture froze at exp 182, we ran the full training schedule on Colab A100 for 12 hours at batch size 16 — a three-stage curriculum:</p>
+<p><img alt="training curves" src="writeup_assets/training_curves.png" /></p>
+<ol>
+<li><strong>Anchor stage (55%)</strong> — train Head 2 + trunk against <code>frame2 → segnet</code> with focal loss. QAT enables at 70% of this stage; you can see the loss spike from ~5 to ~17 when the FP4 codebook turns on at minute ~193, then re-converge.</li>
+<li><strong>Finetune stage (27%)</strong> — freeze Head 2, train Head 1 + pose_mlp against the pose target only (smooth-L1 over the 6-D PoseNet output). Loss drops cleanly by 2 orders of magnitude on the log y-axis.</li>
+<li><strong>Joint stage (13%)</strong> — unfreeze everything, train against the full <code>100·seg + √(10·pose)</code> loss.</li>
+</ol>
+<p>The A100 12h run produced a model at score ≈ 0.41. We then noticed that pose loss was still trending down at the very end of joint, and that we had spare 3090 time, so we ran a 4-hour "joint+" continuation with <code>pose_weight=60</code> and <code>jt_lr=1e-5</code> (one third of the original joint LR). That alone took the score from 0.41 → 0.33. <strong>The clean lesson: with the 0.7 EMA decay used in the final phase, the model was still in a noisy regime; a longer, lower-LR finish on more data converges to a meaningfully better point.</strong></p>
+<p>The bigger surprise was the second continuation. We restarted from the e80 checkpoint of the 3090 run with an even smaller LR (<code>jt_lr=2e-6</code>, ~16× smaller) and lower <code>pose_weight=30</code>. That cut another ~0.03 of pose distortion, bringing the model to <strong>score 0.2986</strong> at epoch 0 of v3 (the model from gen_3090.pt.e80.ckpt). The targeted fine-tune does not touch architecture — it only repaints the weights into a slightly flatter local minimum that the final FP4 quantization rounds onto more cleanly. In retrospect this is consistent with Karpathy's observation that wide minima are friendlier to quantization, but we found it empirically by leaving an <code>EVAL_EPOCH_INTERVAL=10</code> watcher on the run and noticing that the periodic checkpoints were oscillating in a 0.005 band — that band shrank as LR shrank.</p>
+<hr />
+<h2 id="4-sidecar-patches-work-in-progress">4. Sidecar patches (work-in-progress)</h2>
+<p>After the model converged we ran out of training-side leverage but had a few KB of rate budget left. The sidecar idea: the eval networks are <em>frozen, fully differentiable</em> — treat them as oracles to invert. For each pair, find a tiny byte-level perturbation to either the input mask, the input pose, or the output frame that lowers <code>seg_dist + pose_dist</code> more than the per-byte rate cost.</p>
+<p><img alt="sidecar pipeline" src="writeup_assets/sidecar_pipeline.png" /></p>
+<p>We ended up shipping five complementary methods, each searched per-pair, each compressed to its own bz2 stream and finally LZMA2-wrapped together:</p>
+<ul>
+<li><strong>X2</strong> — flip a 2×2 mask block. One block changes the entire feature map via the conv receptive field, so the leverage per byte is enormous. We use <em>verified greedy</em> (try the top-N candidates from the gradient, actually re-run the generator, accept if loss drops) — pure gradient direction is unreliable because multiple flips compound destructively. ~64% acceptance rate, 5 B/patch.</li>
+<li><strong>CMA-ES single-pixel mask flips</strong> for the hardest 100 pairs that X2 didn't fully fix. CMA-ES over <code>K=2</code> flips chosen from the top-30 gradient positions, batched per generation.</li>
+<li><strong>S2</strong> — variable-shape mask flips (1×1, 3×3, 1×4 strip, 4×1 strip, 2×2). Strips capture road edges efficiently.</li>
+<li><strong>C3</strong> — pose-vector deltas via int8 grid search over dimensions 1, 2, 5 (the dominant residuals). Adam-via-autograd through the FP4-quantized generator hung indefinitely; gradient-free 7³ grid search worked reliably.</li>
+<li><strong>Channel-only RGB patches</strong> (250 hardest pairs get K=5, next 250 get K=2). Modify a single color channel of a single pixel of the <em>output</em> frame after the generator. PoseNet's first conv reads YUV at quarter-res, so single-channel single-pixel changes have outsized influence per byte.</li>
+</ul>
+<p>The final unlock was <strong>per-pair method selection</strong>: for each of the top 600 pairs, evaluate every subset of <code>{X2, CMA-ES, S2, C3}</code> (up to 16 combos, batched into one generator forward) and pick the subset that minimizes pose loss. 110 of those 600 pairs ended up better with <em>no</em> sidecar patches than with any subset — meaning even the cheapest greedy patches were sometimes hurting. Combining method selection with an LZMA2 outer wrap (which exploits coordinate repetition across streams) got us from raw model 0.3318 → 0.2999.</p>
+<p>The sidecar exploration is not finished. Things we wanted to try but didn't ship:</p>
+<ul>
+<li>Pose-vector deltas on all 1200 pairs (cheap method, currently only top 200).</li>
+<li>5-bit packed <code>pattern_id + class</code> field (saves ~150 B → ~−0.0001).</li>
+<li>Adversarial-decode at <em>evaluation time</em>: instead of storing patches, run gradient descent through the eval networks at inflate time to refine each frame in-place. We have a working prototype (<code>submissions/adversarial_decode/inflate.py</code>) but the 30-minute eval-time budget on a T4 is tight and we ran out of clock to tune it.</li>
+<li>Mask-pixel flips drawn from a learned codebook so each flip is 2 bytes instead of 5.</li>
+</ul>
+<hr />
+<h2 id="5-reproducing-this-submission">5. Reproducing this submission</h2>
+<pre><code class="language-bash"># Train (A100, 12h)
+cd autoresearch &amp;&amp; CONFIG=B FULL_DATA=1 EMA_DECAY=0.999 COSINE_LR=1 \
+  GRAD_CLIP_OVERRIDE=0.5 TRAIN_BUDGET_SEC_OVERRIDE=$((12*3600)) \
+  python train.py &gt; run.log 2&gt;&amp;1
+
+# Continue on 3090 (4h, joint+ stage with smaller LR + bigger pose weight)
+MODEL_PATH=colab_run/gen.pt SAVE_MODEL_PATH=colab_run/gen_continued.pt \
+  TRAIN_BUDGET_SEC_OVERRIDE=$((4*3600)) POSE_WEIGHT=60 JT_LR_OVERRIDE=1e-5 \
+  python continue_train.py
+
+# Targeted fine-tune (1.5h, smaller LR + smaller pose weight)
+MODEL_PATH=colab_run/3090_run/gen_3090.pt.e80.ckpt SAVE_MODEL_PATH=colab_run/gen_v3.pt \
+  TRAIN_BUDGET_SEC_OVERRIDE=$((90*60)) POSE_WEIGHT=30 JT_LR_OVERRIDE=2e-6 \
+  EMA_DECAY=0.9995 python continue_train.py
+
+# Build sidecar (per-pair selection of X2 + CMA-ES + S2 + C3 + RGB)
+python autoresearch/v2_per_pair_select.py
+</code></pre>
+<p>All training scripts, the autoresearch results table, and the sidecar pipeline code are in <a href="autoresearch/">autoresearch/</a>. The full per-experiment log is at <a href="autoresearch/results.tsv">autoresearch/results.tsv</a> and the agent's running notes at <a href="autoresearch/research_status.md">autoresearch/research_status.md</a>.</p></body></html>

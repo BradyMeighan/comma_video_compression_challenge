@@ -1,0 +1,2 @@
+spec,n_mask_pairs,K_mask_total,n_rgb_pairs,K_rgb_total,sb_mask,sb_rgb,sb_total,score,pose_term,delta,elapsed
+rgb_only_350K7+250K2,0,0,600,2950,0,15055,15055,0.3050233304966522,0.07473179566730041,-0.0267928297226378,136.50728034973145

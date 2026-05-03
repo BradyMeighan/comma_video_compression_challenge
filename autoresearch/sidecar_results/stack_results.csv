@@ -1,0 +1,2 @@
+spec,wave_specs,n_pairs_total,total_K,sidecar_bytes,score,pose_term,delta,elapsed
+base_top300_K7,[K7],300,2100,10836,0.3077088857159664,0.08021982811287423,-0.02411405620028645,71.97233963012695

@@ -1,0 +1,2 @@
+spec,sb_x2,sb_3x3,sb_cma,sb_rgb,sb_total,score,delta
+c2_x2+3x3_residual+cmaes+rgb,2291,289,711,6864,10155,0.301127250187339,-0.0011174579148459651

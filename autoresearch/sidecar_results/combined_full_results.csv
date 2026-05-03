@@ -1,0 +1,2 @@
+spec,n_mask_patches,sb_mask,sb_rgb,sb_total,score,pose_term,delta_baseline,delta_vs_rgb
+mask_K1_top600+rgb_350K7_250K2,389,1837,15244,17081,0.305019278438251,0.07331767833003902,-0.026823160948932057,-2.3160948932055697e-05

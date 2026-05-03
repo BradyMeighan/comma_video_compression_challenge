@@ -1,0 +1,2 @@
+spec,n_searched,n_accepted,K_total,sidecar_bytes,score,pose_term,delta,elapsed
+mask_K1_top600,600,384,384,1796,0.3125901098095101,0.09108142247241761,-0.019239613764900465,488.1547360420227

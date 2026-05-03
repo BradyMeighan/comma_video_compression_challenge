@@ -1,0 +1,8 @@
+name,scale_w,scale_h,pix_fmt,preset,crf,svt_params,decode_filter,archive_bytes,seg,pose,score,elapsed_s
+ref_8bit_crf33_fg22_k180_lanczos_unsharp045,522,392,yuv420p,0,33,film-grain=22:keyint=180:scd=0,"scale=1164:874:flags=lanczos,unsharp=5:5:0.45:5:5:0.0",928340,0.00568905,0.11772632,2.2721,132.78
+p0_like_10bit_crf34_p1_fg30_dn0_keyinf_bicubic_us2,582,436,yuv420p10le,1,34,film-grain=30:film-grain-denoise=0:keyint=-1:scd=0,"scale=1164:874:flags=bicubic,unsharp=5:5:2.0:5:5:0.0",951789,0.00567762,0.12265555,2.309,75.36
+p0_like_8bit_crf34_p1_fg30_dn0_keyinf_bicubic_us2,582,436,yuv420p,1,34,film-grain=30:film-grain-denoise=0:keyint=-1:scd=0,"scale=1164:874:flags=bicubic,unsharp=5:5:2.0:5:5:0.0",975442,0.00581646,0.10006867,2.2315,64.79
+p0_like_10bit_crf34_p1_fg30_dn0_k180_bicubic_us2,582,436,yuv420p10le,1,34,film-grain=30:film-grain-denoise=0:keyint=180:scd=0,"scale=1164:874:flags=bicubic,unsharp=5:5:2.0:5:5:0.0",960266,0.00575009,0.11471939,2.2855,56.09
+p0_like_10bit_crf34_p1_fg30_defaultdn_keyinf_bicubic_us2,582,436,yuv420p10le,1,34,film-grain=30:keyint=-1:scd=0,"scale=1164:874:flags=bicubic,unsharp=5:5:2.0:5:5:0.0",951789,0.00567762,0.12265555,2.309,66.53
+p0_like_10bit_crf34_p1_fg0_keyinf_bicubic_us2,582,436,yuv420p10le,1,34,film-grain=0:keyint=-1:scd=0,"scale=1164:874:flags=bicubic,unsharp=5:5:2.0:5:5:0.0",810262,0.00531532,0.33347644,2.8972,65.59
+p0_like_10bit_crf34_p1_fg30_dn0_keyinf_lanczos_us045,582,436,yuv420p10le,1,34,film-grain=30:film-grain-denoise=0:keyint=-1:scd=0,"scale=1164:874:flags=lanczos,unsharp=5:5:0.45:5:5:0.0",951789,0.00569484,0.120953,2.303,68.78

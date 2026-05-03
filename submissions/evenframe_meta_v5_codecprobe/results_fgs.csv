@@ -1,0 +1,9 @@
+name,encoder,crf,film_grain,film_grain_denoise,fgs_table,archive_kb,rate_term,seg,pose,score,elapsed_s
+fgs_psy_src_baseline_crf35_fg30_dn0,third_party/svt/src/svt-av1-psy-v2.3.0-B/Bin/Release/SvtAv1EncApp.exe,35,30,0,,1891.7,1.2898,0.00458115,0.08042954,2.6448,169.7
+fgs_psy_src_example_crf35_fg0_dn0,third_party/svt/src/svt-av1-psy-v2.3.0-B/Bin/Release/SvtAv1EncApp.exe,35,0,0,example.tbl,1767.0,1.2048,0.00422095,0.33898509,3.4681,189.5
+fgs_psy_src_low_crf35_fg0_dn0,third_party/svt/src/svt-av1-psy-v2.3.0-B/Bin/Release/SvtAv1EncApp.exe,35,0,0,low.tbl,1767.0,1.2048,0.00426105,0.35468526,3.5143,196.4
+fgs_psy_src_high_crf35_fg0_dn0,third_party/svt/src/svt-av1-psy-v2.3.0-B/Bin/Release/SvtAv1EncApp.exe,35,0,0,high.tbl,1767.0,1.2048,0.00421492,0.30698347,3.3784,200.8
+fgs_psy_src_darkboost_crf35_fg0_dn0,third_party/svt/src/svt-av1-psy-v2.3.0-B/Bin/Release/SvtAv1EncApp.exe,35,0,0,darkboost.tbl,1767.0,1.2048,0.00422306,0.25062404,3.2103,216.9
+fgs_psy_src_chroma_crf35_fg0_dn0,third_party/svt/src/svt-av1-psy-v2.3.0-B/Bin/Release/SvtAv1EncApp.exe,35,0,0,chroma.tbl,1768.0,1.2055,0.00423498,0.34000192,3.4729,217.5
+fgs_psyex_prebuilt_baseline_crf35_fg30_dn0,third_party/svt/psyex-v3.0.2B-win64/SvtAv1EncApp.exe,35,30,0,,5134.8,3.5011,0.00435872,0.04765258,4.6273,222.5
+fgs_psyex_prebuilt_example_crf35_fg0_dn0,third_party/svt/psyex-v3.0.2B-win64/SvtAv1EncApp.exe,35,0,0,example.tbl,5013.9,3.4187,0.00365607,0.09504484,4.7592,222.5

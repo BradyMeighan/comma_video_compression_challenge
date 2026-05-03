@@ -1,0 +1,2 @@
+spec,sb_x2,sb_pat,sb_rgb,sb_total,score,delta,n_1x1,n_3x3,n_1x4,n_4x1,n_2x2
+s2_x2+strip_cmaes_top100+rgb,2291,1205,6953,10449,0.3007930459850341,-0.0014516621171508648,40,50,38,31,41

@@ -227,3 +227,58 @@ archive/
 inflated/
 report.txt
 
+# Large data caches & frames (rebuild from videos/, multi-GB)
+**/_cache/
+**/v2_cache/
+**/baseline_frames.pt
+**/baseline_patches.pkl
+**/frames_x5.pt
+**/masks_x5.pt
+**/masks_after_x2.pt
+submissions/phase3/0/
+submissions/mask2mask_*/
+submissions/av1_repro/_cache/
+submissions/evenframe_meta_*/_cache/
+submissions/evenframe_meta_*/native_cases/
+
+# Large videos / images / archives
+*.mkv
+*.mp4
+*.ivf
+*.y4m
+*.gif
+*.zip
+*.npy
+*.npz
+*.exe
+*.dll
+*.bin
+
+# Compressed model dumps & local model snapshots
+compressed_models/*.bin
+tiny_models/*.pt
+**/*.pt
+**/*.ckpt
+
+# Allow critical small ckpts (the e80 base — Drive holds the real copy too)
+!autoresearch/colab_run/3090_run/gen_3090.pt.e80.ckpt
+
+# Third-party vendored binaries (svt-av1 builds, cmix, etc.)
+third_party/
+
+# Vis dirs
+viz_*/
+writeup_assets/
+
+# stdout dumps
+*.stdout
+**/STOP_WATCHER
+
+# Backup model snapshots
+**/*.KNOWN_GOOD_*
+**/h100_ckpts/
+
+# Local debug PNGs
+_frame_*.png
+_leader_*.png
+

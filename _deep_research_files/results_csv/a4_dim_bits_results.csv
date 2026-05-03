@@ -1,0 +1,8 @@
+metric,value
+n_deltas,1750
+mean,-1.3937142857142857
+std,54.47150621252569
+entropy_bits_per_sym,7.629500471656317
+bz2_actual_per_delta,3.888
+frac_int6_fits,0.4868571428571429
+frac_int7_fits,0.7337142857142858

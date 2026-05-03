@@ -187,6 +187,30 @@ def main():
             ep_ckpt = f"{SAVE_MODEL_PATH}.e{epoch}.ckpt"
             torch.save(ema_state, ep_ckpt)
             print(f"[ckpt-ep] saved EMA to {ep_ckpt}", flush=True)
+        # Inline eval — blocks training so no GPU contention
+        EVAL_EPOCH_INTERVAL = int(os.environ.get("EVAL_EPOCH_INTERVAL", "0"))
+        if EVAL_EPOCH_INTERVAL > 0 and epoch % EVAL_EPOCH_INTERVAL == 0:
+            # Snapshot current weights, swap in EMA, eval, restore
+            cur_state = {k: v.detach().clone() for k, v in gen.state_dict().items()}
+            gen.load_state_dict(ema_state)
+            t_eval = time.time()
+            eval_result = evaluate(gen, data, device)
+            eval_time = time.time() - t_eval
+            print(f"[eval] epoch={epoch} score={eval_result['score']:.6f} "
+                  f"seg={eval_result['seg_term']:.4f} pose={eval_result['pose_term']:.4f} "
+                  f"rate={eval_result['rate_term']:.4f} ({eval_time:.0f}s)", flush=True)
+            # write to a CSV next to ckpts
+            eval_csv = f"{SAVE_MODEL_PATH}.eval_log.csv"
+            new_file = not Path(eval_csv).exists()
+            with open(eval_csv, 'a') as f:
+                if new_file:
+                    f.write("epoch,score,seg_term,pose_term,rate_term,eval_time\n")
+                f.write(f"{epoch},{eval_result['score']},{eval_result['seg_term']},"
+                        f"{eval_result['pose_term']},{eval_result['rate_term']},{eval_time}\n")
+            # restore live weights for continued training
+            gen.load_state_dict(cur_state)
+            del cur_state, eval_result
+            gpu_cleanup()
 
     train_time = time.time() - t_start
     print(f"[continue] Done. {epoch} epochs in {train_time:.1f}s")

@@ -1,0 +1,2 @@
+spec,sb_mask,sb_rgb,sb_total,score,pose_term,delta_baseline,delta_vs_rgb_only
+mask_K1_top100+rgb_350K7_250K2,453,15050,15503,0.3043585859444645,0.07379078659611378,-0.027449945113124874,-0.000649945113124873

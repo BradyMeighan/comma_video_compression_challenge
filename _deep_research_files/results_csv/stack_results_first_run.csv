@@ -1,0 +1,7 @@
+spec,wave_specs,n_pairs_total,total_K,sidecar_bytes,score,pose_term,delta,elapsed
+base_top300_K7,[K7],300,2100,10856,0.3077,0.0802,-0.0241,72.9
+stack_top300_K7+K5_same,[K7;K5_same],300,3600,18491,0.3107,0.0781,-0.0212,146.0
+stack_top300_K7+next100_K7,[K7;K7_next100],400,2800,13876,0.3063,0.0768,-0.0255,97.3
+stack_top300_K7+K5_same+next100_K7,[K7;K5_same;K7_next100],400,4300,21548,0.3092,0.0746,-0.0226,170.4
+stack_top300_K7+K5+K3_same,[K7;K5;K3_same],300,4500,23055,0.3134,0.0777,-0.0185,217.9
+stack_top300_K7+rerank100_K7,[K7;rerank100_K7],300,2800,14790,0.3090,0.0789,-0.0228,97.1
