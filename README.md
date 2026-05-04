@@ -144,6 +144,66 @@ The official evaluation has a time limit of 30 minutes. If your inflation script
    <td>
    </td>
    <td>
+    0.26
+   </td>
+   <td>
+    adaptive_masking_joint_frame_model
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/85" target="_blank">
+     #85
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+    0.27
+   </td>
+   <td>
+    jas0xf_adversarial_neural_representation
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/86" target="_blank">
+     #86
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+    0.28
+   </td>
+   <td>
+    adaptive_range_mask_no_router
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/84" target="_blank">
+     #84
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+    0.28
+   </td>
+   <td>
+    qzs3_range_mask
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/81" target="_blank">
+     #81
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
     0.31
    </td>
    <td>
